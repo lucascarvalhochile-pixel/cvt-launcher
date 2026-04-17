@@ -48,9 +48,9 @@ ACTION_UPDATE_SALE_ITEM_STATUS = "60e04b75876ff9dc35df21a885e286e199691081f4"
 launch_log = []
 
 # Auto-scan config
-AUTO_SCAN_INTERVAL = int(os.environ.get("AUTO_SCAN_INTERVAL", "300"))  # seconds (default 5 min)
+BATCH_HOURS = [int(h) for h in os.environ.get("BATCH_HOURS", "7,13,20").split(",")]  # hours to run batches
 GO_LIVE_DATE = os.environ.get("GO_LIVE_DATE", "2026-04-18")  # only process emails from this date onward
-auto_scan_status = {"last_run": None, "last_result": None, "running": False}
+auto_scan_status = {"last_run": None, "last_result": None, "running": False, "next_batch": None}
 
 # Daily summary config
 SUMMARY_EMAIL_TO = os.environ.get("SUMMARY_EMAIL_TO", "lucascarvalhochile@gmail.com")
@@ -1193,99 +1193,126 @@ async function testLogin() {
 # AUTO-SCAN BACKGROUND WORKER
 # ═══════════════════════════════════════════════════════
 
+def _get_next_batch_time(now):
+    """Calculate next batch time from BATCH_HOURS."""
+    today_batches = [now.replace(hour=h, minute=0, second=0, microsecond=0) for h in BATCH_HOURS]
+    # Find next future batch today
+    for bt in today_batches:
+        if bt > now:
+            return bt
+    # All today's batches passed — first batch tomorrow
+    tomorrow = now + timedelta(days=1)
+    return tomorrow.replace(hour=BATCH_HOURS[0], minute=0, second=0, microsecond=0)
+
+
+def run_batch():
+    """Execute one batch: scan emails and launch all new sales."""
+    go_live = datetime.strptime(GO_LIVE_DATE, "%Y-%m-%d")
+
+    auto_scan_status["running"] = True
+    auto_scan_status["last_run"] = datetime.now().isoformat()
+
+    # Lookback: hours since go-live, max 48h
+    hours_since_live = min((datetime.now() - go_live).total_seconds() / 3600, 48)
+    hours_since_live = max(hours_since_live, 1)
+
+    print(f"[BATCH] Scanning emails from last {hours_since_live:.1f}h...")
+    emails = fetch_new_booking_emails(max_results=50, since_hours=int(hours_since_live) + 1)
+
+    new_bookings = [e for e in emails if e.get("type") == "NOVA_RESERVA"]
+    launched = 0
+    skipped = 0
+    errors = 0
+
+    for em in new_bookings:
+        # Skip if already launched
+        already = any(
+            l.get("booking_number") == em.get("booking_number") and l.get("status") == "OK"
+            for l in launch_log
+        )
+        if already:
+            skipped += 1
+            continue
+
+        sale_payload, codigo_lcx = build_lcx_sale(em)
+
+        if not codigo_lcx:
+            entry = {
+                "timestamp": datetime.now().isoformat(),
+                "booking_number": em.get("booking_number", ""),
+                "atividade": em.get("atividade", ""),
+                "cidade": em.get("cidade", ""),
+                "status": "SEM_CODIGO",
+                "error": "Tour não mapeado",
+            }
+            launch_log.insert(0, entry)
+            errors += 1
+            continue
+
+        result = lcx_client.create_sale(sale_payload)
+
+        # Update status to CONFIRMED
+        if result.get("success") and result.get("sale_id") and result["sale_id"] not in ("unknown", "pending"):
+            lcx_client.update_sale_status(result["sale_id"], "CONFIRMED")
+
+        entry = {
+            "timestamp": datetime.now().isoformat(),
+            "booking_number": em.get("booking_number", ""),
+            "atividade": em.get("atividade", ""),
+            "cidade": em.get("cidade", ""),
+            "cliente": f"{em.get('nome', '')} {em.get('sobrenomes', '')}".strip(),
+            "num_pessoas": em.get("num_total", 0),
+            "preco_venda": em.get("preco_venda", ""),
+            "codigo_lcx": codigo_lcx,
+            "status": "OK" if result.get("success") else "ERRO",
+            "sale_id": result.get("sale_id", ""),
+            "error": result.get("error", ""),
+            "source": "batch",
+        }
+        launch_log.insert(0, entry)
+
+        if result.get("success"):
+            launched += 1
+        else:
+            errors += 1
+
+    summary = f"found={len(new_bookings)} launched={launched} skipped={skipped} errors={errors}"
+    auto_scan_status["last_result"] = summary
+    auto_scan_status["running"] = False
+    return summary
+
+
 def auto_scan_worker():
-    """Background thread: scan emails and launch sales automatically."""
+    """Background thread: run batches at scheduled hours (7h, 13h, 20h)."""
     go_live = datetime.strptime(GO_LIVE_DATE, "%Y-%m-%d")
 
     # Wait until go-live date
     while datetime.now() < go_live:
         wait_secs = (go_live - datetime.now()).total_seconds()
-        print(f"[AUTO-SCAN] Waiting for go-live date {GO_LIVE_DATE}. {wait_secs/3600:.1f}h remaining.")
-        time.sleep(min(wait_secs + 60, 3600))  # check every hour max
+        print(f"[BATCH] Waiting for go-live date {GO_LIVE_DATE}. {wait_secs/3600:.1f}h remaining.")
+        time.sleep(min(wait_secs + 60, 3600))
 
-    print(f"[AUTO-SCAN] GO LIVE! Starting auto-scan every {AUTO_SCAN_INTERVAL}s")
+    print(f"[BATCH] GO LIVE! Batch hours: {BATCH_HOURS}")
 
     while True:
+        now = datetime.now()
+        next_batch = _get_next_batch_time(now)
+        auto_scan_status["next_batch"] = next_batch.strftime("%Y-%m-%d %H:%M")
+        wait_secs = (next_batch - now).total_seconds()
+
+        print(f"[BATCH] Next batch at {next_batch.strftime('%H:%M')} ({wait_secs/60:.0f} min from now)")
+        time.sleep(max(wait_secs, 60))  # sleep until next batch
+
         try:
-            auto_scan_status["running"] = True
-            auto_scan_status["last_run"] = datetime.now().isoformat()
-
-            # Calculate hours since go-live (max 48h lookback)
-            hours_since_live = min((datetime.now() - go_live).total_seconds() / 3600, 48)
-            hours_since_live = max(hours_since_live, 1)  # at least 1 hour
-
-            print(f"[AUTO-SCAN] Scanning emails from last {hours_since_live:.1f}h...")
-            emails = fetch_new_booking_emails(max_results=50, since_hours=int(hours_since_live) + 1)
-
-            new_bookings = [e for e in emails if e.get("type") == "NOVA_RESERVA"]
-            launched = 0
-            skipped = 0
-            errors = 0
-
-            for em in new_bookings:
-                # Skip if already launched
-                already = any(
-                    l.get("booking_number") == em.get("booking_number") and l.get("status") == "OK"
-                    for l in launch_log
-                )
-                if already:
-                    skipped += 1
-                    continue
-
-                sale_payload, codigo_lcx = build_lcx_sale(em)
-
-                if not codigo_lcx:
-                    entry = {
-                        "timestamp": datetime.now().isoformat(),
-                        "booking_number": em.get("booking_number", ""),
-                        "atividade": em.get("atividade", ""),
-                        "cidade": em.get("cidade", ""),
-                        "status": "SEM_CODIGO",
-                        "error": "Tour não mapeado",
-                    }
-                    launch_log.insert(0, entry)
-                    errors += 1
-                    continue
-
-                result = lcx_client.create_sale(sale_payload)
-
-                # Update status to CONFIRMED
-                if result.get("success") and result.get("sale_id") and result["sale_id"] not in ("unknown", "pending"):
-                    lcx_client.update_sale_status(result["sale_id"], "CONFIRMED")
-
-                entry = {
-                    "timestamp": datetime.now().isoformat(),
-                    "booking_number": em.get("booking_number", ""),
-                    "atividade": em.get("atividade", ""),
-                    "cidade": em.get("cidade", ""),
-                    "cliente": f"{em.get('nome', '')} {em.get('sobrenomes', '')}".strip(),
-                    "num_pessoas": em.get("num_total", 0),
-                    "preco_venda": em.get("preco_venda", ""),
-                    "codigo_lcx": codigo_lcx,
-                    "status": "OK" if result.get("success") else "ERRO",
-                    "sale_id": result.get("sale_id", ""),
-                    "error": result.get("error", ""),
-                    "source": "auto-scan",
-                }
-                launch_log.insert(0, entry)
-
-                if result.get("success"):
-                    launched += 1
-                else:
-                    errors += 1
-
-            summary = f"found={len(new_bookings)} launched={launched} skipped={skipped} errors={errors}"
-            auto_scan_status["last_result"] = summary
-            auto_scan_status["running"] = False
-            print(f"[AUTO-SCAN] Done: {summary}")
-
+            print(f"[BATCH] === Running batch {datetime.now().strftime('%H:%M')} ===")
+            summary = run_batch()
+            print(f"[BATCH] Done: {summary}")
         except Exception as e:
             auto_scan_status["running"] = False
             auto_scan_status["last_result"] = f"ERROR: {e}"
-            print(f"[AUTO-SCAN ERROR] {e}")
+            print(f"[BATCH ERROR] {e}")
             traceback.print_exc()
-
-        time.sleep(AUTO_SCAN_INTERVAL)
+            time.sleep(300)  # wait 5 min before retrying on error
 
 
 @app.route("/api/auto-scan-status")
