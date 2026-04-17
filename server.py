@@ -1565,7 +1565,7 @@ def api_send_test_summary():
 # Start background threads on app boot
 _scan_thread = threading.Thread(target=auto_scan_worker, daemon=True)
 _scan_thread.start()
-print(f"[AUTO-SCAN] Thread started. Go-live: {GO_LIVE_DATE}, interval: {AUTO_SCAN_INTERVAL}s")
+print(f"[AUTO-SCAN] Thread started. Go-live: {GO_LIVE_DATE}, batch hours: {BATCH_HOURS}")
 
 _summary_thread = threading.Thread(target=daily_summary_worker, daemon=True)
 _summary_thread.start()
