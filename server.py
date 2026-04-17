@@ -1430,10 +1430,22 @@ def send_daily_summary(target_date):
     msg.attach(MIMEText(html, "html"))
 
     try:
-        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as smtp:
+        # Try port 587 with STARTTLS first (works on most cloud platforms)
+        try:
+            smtp = smtplib.SMTP("smtp.gmail.com", 587, timeout=30)
+            smtp.ehlo()
+            smtp.starttls()
+            smtp.ehlo()
             smtp.login(GMAIL_EMAIL, GMAIL_APP_PASSWORD)
             smtp.send_message(msg)
-        print(f"[SUMMARY] Email sent to {SUMMARY_EMAIL_TO}: {subject}")
+            smtp.quit()
+            print(f"[SUMMARY] Email sent via 587/STARTTLS to {SUMMARY_EMAIL_TO}: {subject}")
+        except Exception as e587:
+            print(f"[SUMMARY] Port 587 failed ({e587}), trying 465/SSL...")
+            with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=30) as smtp:
+                smtp.login(GMAIL_EMAIL, GMAIL_APP_PASSWORD)
+                smtp.send_message(msg)
+            print(f"[SUMMARY] Email sent via 465/SSL to {SUMMARY_EMAIL_TO}: {subject}")
     except Exception as e:
         print(f"[SUMMARY ERROR] Failed to send: {e}")
         traceback.print_exc()
@@ -1549,9 +1561,20 @@ def api_send_test_summary():
         msg["To"] = SUMMARY_EMAIL_TO
         msg.attach(MIMEText(html, "html"))
 
-        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as smtp:
+        # Try port 587 with STARTTLS first (works on most cloud platforms)
+        try:
+            smtp = smtplib.SMTP("smtp.gmail.com", 587, timeout=30)
+            smtp.ehlo()
+            smtp.starttls()
+            smtp.ehlo()
             smtp.login(GMAIL_EMAIL, GMAIL_APP_PASSWORD)
             smtp.send_message(msg)
+            smtp.quit()
+        except Exception as e587:
+            print(f"[TEST] Port 587 failed ({e587}), trying 465/SSL...")
+            with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=30) as smtp:
+                smtp.login(GMAIL_EMAIL, GMAIL_APP_PASSWORD)
+                smtp.send_message(msg)
 
         return jsonify({"sent": True, "test": True, "ok": ok_count, "sem_codigo": sem_count, "to": SUMMARY_EMAIL_TO})
     except Exception as e:
