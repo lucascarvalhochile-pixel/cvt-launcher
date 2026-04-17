@@ -11,6 +11,8 @@ import email as email_lib
 from email.header import decode_header
 from datetime import datetime, timedelta
 import traceback
+import threading
+import time
 import requests
 from bs4 import BeautifulSoup
 from flask import Flask, request, jsonify, render_template_string
@@ -41,6 +43,11 @@ ACTION_UPDATE_SALE_ITEM_STATUS = "60e04b75876ff9dc35df21a885e286e199691081f4"
 
 # In-memory log of launches
 launch_log = []
+
+# Auto-scan config
+AUTO_SCAN_INTERVAL = int(os.environ.get("AUTO_SCAN_INTERVAL", "900"))  # seconds (default 15 min)
+GO_LIVE_DATE = os.environ.get("GO_LIVE_DATE", "2026-04-18")  # only process emails from this date onward
+auto_scan_status = {"last_run": None, "last_result": None, "running": False}
 
 # ═══════════════════════════════════════════════════════
 # CITY → COUNTRY MAPPING
@@ -1174,6 +1181,117 @@ async function testLogin() {
 </body>
 </html>
 """
+
+# ═══════════════════════════════════════════════════════
+# AUTO-SCAN BACKGROUND WORKER
+# ═══════════════════════════════════════════════════════
+
+def auto_scan_worker():
+    """Background thread: scan emails and launch sales automatically."""
+    go_live = datetime.strptime(GO_LIVE_DATE, "%Y-%m-%d")
+
+    # Wait until go-live date
+    while datetime.now() < go_live:
+        wait_secs = (go_live - datetime.now()).total_seconds()
+        print(f"[AUTO-SCAN] Waiting for go-live date {GO_LIVE_DATE}. {wait_secs/3600:.1f}h remaining.")
+        time.sleep(min(wait_secs + 60, 3600))  # check every hour max
+
+    print(f"[AUTO-SCAN] GO LIVE! Starting auto-scan every {AUTO_SCAN_INTERVAL}s")
+
+    while True:
+        try:
+            auto_scan_status["running"] = True
+            auto_scan_status["last_run"] = datetime.now().isoformat()
+
+            # Calculate hours since go-live (max 48h lookback)
+            hours_since_live = min((datetime.now() - go_live).total_seconds() / 3600, 48)
+            hours_since_live = max(hours_since_live, 1)  # at least 1 hour
+
+            print(f"[AUTO-SCAN] Scanning emails from last {hours_since_live:.1f}h...")
+            emails = fetch_new_booking_emails(max_results=50, since_hours=int(hours_since_live) + 1)
+
+            new_bookings = [e for e in emails if e.get("type") == "NOVA_RESERVA"]
+            launched = 0
+            skipped = 0
+            errors = 0
+
+            for em in new_bookings:
+                # Skip if already launched
+                already = any(
+                    l.get("booking_number") == em.get("booking_number") and l.get("status") == "OK"
+                    for l in launch_log
+                )
+                if already:
+                    skipped += 1
+                    continue
+
+                sale_payload, codigo_lcx = build_lcx_sale(em)
+
+                if not codigo_lcx:
+                    entry = {
+                        "timestamp": datetime.now().isoformat(),
+                        "booking_number": em.get("booking_number", ""),
+                        "atividade": em.get("atividade", ""),
+                        "cidade": em.get("cidade", ""),
+                        "status": "SEM_CODIGO",
+                        "error": "Tour não mapeado",
+                    }
+                    launch_log.insert(0, entry)
+                    errors += 1
+                    continue
+
+                result = lcx_client.create_sale(sale_payload)
+
+                # Update status to CONFIRMED
+                if result.get("success") and result.get("sale_id") and result["sale_id"] not in ("unknown", "pending"):
+                    lcx_client.update_sale_status(result["sale_id"], "CONFIRMED")
+
+                entry = {
+                    "timestamp": datetime.now().isoformat(),
+                    "booking_number": em.get("booking_number", ""),
+                    "atividade": em.get("atividade", ""),
+                    "cidade": em.get("cidade", ""),
+                    "cliente": f"{em.get('nome', '')} {em.get('sobrenomes', '')}".strip(),
+                    "num_pessoas": em.get("num_total", 0),
+                    "preco_venda": em.get("preco_venda", ""),
+                    "codigo_lcx": codigo_lcx,
+                    "status": "OK" if result.get("success") else "ERRO",
+                    "sale_id": result.get("sale_id", ""),
+                    "error": result.get("error", ""),
+                    "source": "auto-scan",
+                }
+                launch_log.insert(0, entry)
+
+                if result.get("success"):
+                    launched += 1
+                else:
+                    errors += 1
+
+            summary = f"found={len(new_bookings)} launched={launched} skipped={skipped} errors={errors}"
+            auto_scan_status["last_result"] = summary
+            auto_scan_status["running"] = False
+            print(f"[AUTO-SCAN] Done: {summary}")
+
+        except Exception as e:
+            auto_scan_status["running"] = False
+            auto_scan_status["last_result"] = f"ERROR: {e}"
+            print(f"[AUTO-SCAN ERROR] {e}")
+            traceback.print_exc()
+
+        time.sleep(AUTO_SCAN_INTERVAL)
+
+
+@app.route("/api/auto-scan-status")
+def api_auto_scan_status():
+    """Check auto-scan status."""
+    return jsonify(auto_scan_status)
+
+
+# Start auto-scan thread on app boot
+_scan_thread = threading.Thread(target=auto_scan_worker, daemon=True)
+_scan_thread.start()
+print(f"[AUTO-SCAN] Thread started. Go-live: {GO_LIVE_DATE}, interval: {AUTO_SCAN_INTERVAL}s")
+
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
