@@ -45,7 +45,7 @@ ACTION_UPDATE_SALE_ITEM_STATUS = "60e04b75876ff9dc35df21a885e286e199691081f4"
 launch_log = []
 
 # Auto-scan config
-AUTO_SCAN_INTERVAL = int(os.environ.get("AUTO_SCAN_INTERVAL", "900"))  # seconds (default 15 min)
+AUTO_SCAN_INTERVAL = int(os.environ.get("AUTO_SCAN_INTERVAL", "300"))  # seconds (default 5 min)
 GO_LIVE_DATE = os.environ.get("GO_LIVE_DATE", "2026-04-18")  # only process emails from this date onward
 auto_scan_status = {"last_run": None, "last_result": None, "running": False}
 
