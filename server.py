@@ -7,8 +7,11 @@ import os
 import re
 import json
 import imaplib
+import smtplib
 import email as email_lib
 from email.header import decode_header
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 from datetime import datetime, timedelta
 import traceback
 import threading
@@ -48,6 +51,10 @@ launch_log = []
 AUTO_SCAN_INTERVAL = int(os.environ.get("AUTO_SCAN_INTERVAL", "300"))  # seconds (default 5 min)
 GO_LIVE_DATE = os.environ.get("GO_LIVE_DATE", "2026-04-18")  # only process emails from this date onward
 auto_scan_status = {"last_run": None, "last_result": None, "running": False}
+
+# Daily summary config
+SUMMARY_EMAIL_TO = os.environ.get("SUMMARY_EMAIL_TO", "lucascarvalhochile@gmail.com")
+SUMMARY_HOUR = int(os.environ.get("SUMMARY_HOUR", "7"))  # send at 7am
 
 # ═══════════════════════════════════════════════════════
 # CITY → COUNTRY MAPPING
@@ -1287,10 +1294,169 @@ def api_auto_scan_status():
     return jsonify(auto_scan_status)
 
 
-# Start auto-scan thread on app boot
+# ═══════════════════════════════════════════════════════
+# DAILY SUMMARY EMAIL
+# ═══════════════════════════════════════════════════════
+
+def build_daily_summary(target_date):
+    """Build HTML summary of launches for a specific date."""
+    date_str = target_date.strftime("%Y-%m-%d")
+    day_launches = [l for l in launch_log if l.get("timestamp", "").startswith(date_str)]
+
+    ok = [l for l in day_launches if l.get("status") == "OK"]
+    errors = [l for l in day_launches if l.get("status") == "ERRO"]
+    sem_codigo = [l for l in day_launches if l.get("status") == "SEM_CODIGO"]
+
+    total_valor = 0
+    for l in ok:
+        try:
+            v = str(l.get("preco_venda", "0")).replace(".", "").replace(",", ".")
+            total_valor += float(v)
+        except:
+            pass
+
+    total_pessoas = sum(l.get("num_pessoas", 0) for l in ok)
+
+    # Build HTML
+    html = f"""
+    <div style="font-family:'Segoe UI',sans-serif;max-width:700px;margin:0 auto;background:#0f172a;color:#e2e8f0;border-radius:12px;overflow:hidden;">
+        <div style="background:linear-gradient(135deg,#1e293b,#334155);padding:20px 30px;border-bottom:2px solid #f43f5e;">
+            <h1 style="margin:0;font-size:20px;color:#f8fafc;">🚀 CVT Launcher — Resumo do dia</h1>
+            <p style="margin:5px 0 0;color:#94a3b8;font-size:14px;">{target_date.strftime('%d/%m/%Y')} ({target_date.strftime('%A')})</p>
+        </div>
+
+        <div style="padding:20px 30px;">
+            <div style="display:flex;gap:15px;margin-bottom:20px;">
+                <div style="background:#1e293b;border-radius:10px;padding:15px 20px;flex:1;text-align:center;">
+                    <div style="font-size:28px;font-weight:bold;color:#10b981;">{len(ok)}</div>
+                    <div style="font-size:12px;color:#94a3b8;">Lançadas</div>
+                </div>
+                <div style="background:#1e293b;border-radius:10px;padding:15px 20px;flex:1;text-align:center;">
+                    <div style="font-size:28px;font-weight:bold;color:#3b82f6;">{total_pessoas}</div>
+                    <div style="font-size:12px;color:#94a3b8;">Pessoas</div>
+                </div>
+                <div style="background:#1e293b;border-radius:10px;padding:15px 20px;flex:1;text-align:center;">
+                    <div style="font-size:28px;font-weight:bold;color:#f59e0b;">R$ {total_valor:,.2f}</div>
+                    <div style="font-size:12px;color:#94a3b8;">Valor líquido</div>
+                </div>
+            </div>
+    """
+
+    if errors:
+        html += f'<p style="color:#ef4444;font-size:13px;">⚠️ {len(errors)} venda(s) com erro</p>'
+    if sem_codigo:
+        html += f'<p style="color:#f59e0b;font-size:13px;">⚠️ {len(sem_codigo)} tour(s) sem código LCX mapeado</p>'
+
+    if ok:
+        html += """
+            <table style="width:100%;border-collapse:collapse;margin-top:15px;">
+                <tr style="background:#1e293b;">
+                    <th style="padding:10px;text-align:left;font-size:11px;color:#94a3b8;text-transform:uppercase;">Reserva</th>
+                    <th style="padding:10px;text-align:left;font-size:11px;color:#94a3b8;text-transform:uppercase;">Atividade</th>
+                    <th style="padding:10px;text-align:left;font-size:11px;color:#94a3b8;text-transform:uppercase;">Cliente</th>
+                    <th style="padding:10px;text-align:left;font-size:11px;color:#94a3b8;text-transform:uppercase;">Pessoas</th>
+                    <th style="padding:10px;text-align:left;font-size:11px;color:#94a3b8;text-transform:uppercase;">Código</th>
+                </tr>
+        """
+        for l in ok:
+            html += f"""
+                <tr style="border-bottom:1px solid #1e293b;">
+                    <td style="padding:8px 10px;font-size:13px;">#{l.get('booking_number','')}</td>
+                    <td style="padding:8px 10px;font-size:13px;">{l.get('atividade','')[:40]}</td>
+                    <td style="padding:8px 10px;font-size:13px;">{l.get('cliente','')[:25]}</td>
+                    <td style="padding:8px 10px;font-size:13px;">{l.get('num_pessoas',0)}</td>
+                    <td style="padding:8px 10px;font-size:13px;">{l.get('codigo_lcx','')}</td>
+                </tr>
+            """
+        html += "</table>"
+
+    if not day_launches:
+        html += '<p style="text-align:center;color:#64748b;padding:30px;">Nenhuma reserva processada neste dia.</p>'
+
+    html += """
+        </div>
+        <div style="padding:15px 30px;background:#1e293b;text-align:center;font-size:11px;color:#64748b;">
+            CVT Launcher — Automação Civitatis → LCX | LC Turismo
+        </div>
+    </div>
+    """
+    return html, len(ok), len(errors), len(sem_codigo)
+
+
+def send_daily_summary(target_date):
+    """Send daily summary email via SMTP."""
+    if not GMAIL_EMAIL or not GMAIL_APP_PASSWORD or not SUMMARY_EMAIL_TO:
+        print("[SUMMARY] Missing email credentials, skipping.")
+        return
+
+    html, ok_count, err_count, sem_count = build_daily_summary(target_date)
+    date_label = target_date.strftime('%d/%m/%Y')
+
+    subject = f"🚀 CVT Launcher — {ok_count} venda(s) lançada(s) em {date_label}"
+    if ok_count == 0:
+        subject = f"CVT Launcher — Nenhuma venda em {date_label}"
+
+    msg = MIMEMultipart("alternative")
+    msg["Subject"] = subject
+    msg["From"] = f"CVT Launcher <{GMAIL_EMAIL}>"
+    msg["To"] = SUMMARY_EMAIL_TO
+    msg.attach(MIMEText(html, "html"))
+
+    try:
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as smtp:
+            smtp.login(GMAIL_EMAIL, GMAIL_APP_PASSWORD)
+            smtp.send_message(msg)
+        print(f"[SUMMARY] Email sent to {SUMMARY_EMAIL_TO}: {subject}")
+    except Exception as e:
+        print(f"[SUMMARY ERROR] Failed to send: {e}")
+        traceback.print_exc()
+
+
+def daily_summary_worker():
+    """Background thread: send daily summary at SUMMARY_HOUR."""
+    go_live = datetime.strptime(GO_LIVE_DATE, "%Y-%m-%d")
+    last_sent_date = None
+
+    while True:
+        now = datetime.now()
+
+        # Only start after go-live + 1 day (need at least 1 day of data)
+        if now < go_live + timedelta(days=1):
+            time.sleep(3600)
+            continue
+
+        # Send at SUMMARY_HOUR if not already sent today
+        if now.hour >= SUMMARY_HOUR and last_sent_date != now.date():
+            yesterday = (now - timedelta(days=1)).date()
+            target = datetime(yesterday.year, yesterday.month, yesterday.day)
+            print(f"[SUMMARY] Sending summary for {yesterday}...")
+            try:
+                send_daily_summary(target)
+                last_sent_date = now.date()
+            except Exception as e:
+                print(f"[SUMMARY ERROR] {e}")
+                traceback.print_exc()
+
+        time.sleep(600)  # check every 10 min
+
+
+@app.route("/api/send-summary")
+def api_send_summary():
+    """Manually trigger a summary email for yesterday."""
+    yesterday = datetime.now() - timedelta(days=1)
+    target = datetime(yesterday.year, yesterday.month, yesterday.day)
+    send_daily_summary(target)
+    return jsonify({"sent": True, "date": target.strftime("%Y-%m-%d"), "to": SUMMARY_EMAIL_TO})
+
+
+# Start background threads on app boot
 _scan_thread = threading.Thread(target=auto_scan_worker, daemon=True)
 _scan_thread.start()
 print(f"[AUTO-SCAN] Thread started. Go-live: {GO_LIVE_DATE}, interval: {AUTO_SCAN_INTERVAL}s")
+
+_summary_thread = threading.Thread(target=daily_summary_worker, daemon=True)
+_summary_thread.start()
+print(f"[SUMMARY] Thread started. Sends at {SUMMARY_HOUR}:00 to {SUMMARY_EMAIL_TO}")
 
 
 if __name__ == "__main__":
