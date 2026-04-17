@@ -7,11 +7,8 @@ import os
 import re
 import json
 import imaplib
-import smtplib
 import email as email_lib
 from email.header import decode_header
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
 from datetime import datetime, timedelta
 import traceback
 import threading
@@ -48,13 +45,9 @@ ACTION_UPDATE_SALE_ITEM_STATUS = "60e04b75876ff9dc35df21a885e286e199691081f4"
 launch_log = []
 
 # Auto-scan config
-BATCH_HOURS = [int(h) for h in os.environ.get("BATCH_HOURS", "7,13,20").split(",")]  # hours to run batches
+AUTO_SCAN_INTERVAL = int(os.environ.get("AUTO_SCAN_INTERVAL", "300"))  # 5 min
 GO_LIVE_DATE = os.environ.get("GO_LIVE_DATE", "2026-04-18")  # only process emails from this date onward
-auto_scan_status = {"last_run": None, "last_result": None, "running": False, "next_batch": None}
-
-# Daily summary config
-SUMMARY_EMAIL_TO = os.environ.get("SUMMARY_EMAIL_TO", "lucascarvalhochile@gmail.com")
-SUMMARY_HOUR = int(os.environ.get("SUMMARY_HOUR", "7"))  # send at 7am
+auto_scan_status = {"last_run": None, "last_result": None, "running": False}
 
 # ═══════════════════════════════════════════════════════
 # CITY → COUNTRY MAPPING
@@ -1193,126 +1186,94 @@ async function testLogin() {
 # AUTO-SCAN BACKGROUND WORKER
 # ═══════════════════════════════════════════════════════
 
-def _get_next_batch_time(now):
-    """Calculate next batch time from BATCH_HOURS."""
-    today_batches = [now.replace(hour=h, minute=0, second=0, microsecond=0) for h in BATCH_HOURS]
-    # Find next future batch today
-    for bt in today_batches:
-        if bt > now:
-            return bt
-    # All today's batches passed — first batch tomorrow
-    tomorrow = now + timedelta(days=1)
-    return tomorrow.replace(hour=BATCH_HOURS[0], minute=0, second=0, microsecond=0)
-
-
-def run_batch():
-    """Execute one batch: scan emails and launch all new sales."""
-    go_live = datetime.strptime(GO_LIVE_DATE, "%Y-%m-%d")
-
-    auto_scan_status["running"] = True
-    auto_scan_status["last_run"] = datetime.now().isoformat()
-
-    # Lookback: hours since go-live, max 48h
-    hours_since_live = min((datetime.now() - go_live).total_seconds() / 3600, 48)
-    hours_since_live = max(hours_since_live, 1)
-
-    print(f"[BATCH] Scanning emails from last {hours_since_live:.1f}h...")
-    emails = fetch_new_booking_emails(max_results=50, since_hours=int(hours_since_live) + 1)
-
-    new_bookings = [e for e in emails if e.get("type") == "NOVA_RESERVA"]
-    launched = 0
-    skipped = 0
-    errors = 0
-
-    for em in new_bookings:
-        # Skip if already launched
-        already = any(
-            l.get("booking_number") == em.get("booking_number") and l.get("status") == "OK"
-            for l in launch_log
-        )
-        if already:
-            skipped += 1
-            continue
-
-        sale_payload, codigo_lcx = build_lcx_sale(em)
-
-        if not codigo_lcx:
-            entry = {
-                "timestamp": datetime.now().isoformat(),
-                "booking_number": em.get("booking_number", ""),
-                "atividade": em.get("atividade", ""),
-                "cidade": em.get("cidade", ""),
-                "status": "SEM_CODIGO",
-                "error": "Tour não mapeado",
-            }
-            launch_log.insert(0, entry)
-            errors += 1
-            continue
-
-        result = lcx_client.create_sale(sale_payload)
-
-        # Update status to CONFIRMED
-        if result.get("success") and result.get("sale_id") and result["sale_id"] not in ("unknown", "pending"):
-            lcx_client.update_sale_status(result["sale_id"], "CONFIRMED")
-
-        entry = {
-            "timestamp": datetime.now().isoformat(),
-            "booking_number": em.get("booking_number", ""),
-            "atividade": em.get("atividade", ""),
-            "cidade": em.get("cidade", ""),
-            "cliente": f"{em.get('nome', '')} {em.get('sobrenomes', '')}".strip(),
-            "num_pessoas": em.get("num_total", 0),
-            "preco_venda": em.get("preco_venda", ""),
-            "codigo_lcx": codigo_lcx,
-            "status": "OK" if result.get("success") else "ERRO",
-            "sale_id": result.get("sale_id", ""),
-            "error": result.get("error", ""),
-            "source": "batch",
-        }
-        launch_log.insert(0, entry)
-
-        if result.get("success"):
-            launched += 1
-        else:
-            errors += 1
-
-    summary = f"found={len(new_bookings)} launched={launched} skipped={skipped} errors={errors}"
-    auto_scan_status["last_result"] = summary
-    auto_scan_status["running"] = False
-    return summary
-
-
 def auto_scan_worker():
-    """Background thread: run batches at scheduled hours (7h, 13h, 20h)."""
+    """Background thread: scan every AUTO_SCAN_INTERVAL seconds."""
     go_live = datetime.strptime(GO_LIVE_DATE, "%Y-%m-%d")
 
     # Wait until go-live date
     while datetime.now() < go_live:
         wait_secs = (go_live - datetime.now()).total_seconds()
-        print(f"[BATCH] Waiting for go-live date {GO_LIVE_DATE}. {wait_secs/3600:.1f}h remaining.")
+        print(f"[AUTO-SCAN] Waiting for go-live {GO_LIVE_DATE}. {wait_secs/3600:.1f}h remaining.")
         time.sleep(min(wait_secs + 60, 3600))
 
-    print(f"[BATCH] GO LIVE! Batch hours: {BATCH_HOURS}")
+    print(f"[AUTO-SCAN] GO LIVE! Scanning every {AUTO_SCAN_INTERVAL}s")
 
     while True:
-        now = datetime.now()
-        next_batch = _get_next_batch_time(now)
-        auto_scan_status["next_batch"] = next_batch.strftime("%Y-%m-%d %H:%M")
-        wait_secs = (next_batch - now).total_seconds()
-
-        print(f"[BATCH] Next batch at {next_batch.strftime('%H:%M')} ({wait_secs/60:.0f} min from now)")
-        time.sleep(max(wait_secs, 60))  # sleep until next batch
-
         try:
-            print(f"[BATCH] === Running batch {datetime.now().strftime('%H:%M')} ===")
-            summary = run_batch()
-            print(f"[BATCH] Done: {summary}")
+            auto_scan_status["running"] = True
+            auto_scan_status["last_run"] = datetime.now().isoformat()
+
+            hours_since_live = min((datetime.now() - go_live).total_seconds() / 3600, 48)
+            hours_since_live = max(hours_since_live, 1)
+
+            emails = fetch_new_booking_emails(max_results=50, since_hours=int(hours_since_live) + 1)
+            new_bookings = [e for e in emails if e.get("type") == "NOVA_RESERVA"]
+            launched = 0
+            skipped = 0
+            errors = 0
+
+            for em in new_bookings:
+                already = any(
+                    l.get("booking_number") == em.get("booking_number") and l.get("status") == "OK"
+                    for l in launch_log
+                )
+                if already:
+                    skipped += 1
+                    continue
+
+                sale_payload, codigo_lcx = build_lcx_sale(em)
+
+                if not codigo_lcx:
+                    entry = {
+                        "timestamp": datetime.now().isoformat(),
+                        "booking_number": em.get("booking_number", ""),
+                        "atividade": em.get("atividade", ""),
+                        "cidade": em.get("cidade", ""),
+                        "status": "SEM_CODIGO",
+                        "error": "Tour não mapeado",
+                    }
+                    launch_log.insert(0, entry)
+                    errors += 1
+                    continue
+
+                result = lcx_client.create_sale(sale_payload)
+
+                if result.get("success") and result.get("sale_id") and result["sale_id"] not in ("unknown", "pending"):
+                    lcx_client.update_sale_status(result["sale_id"], "CONFIRMED")
+
+                entry = {
+                    "timestamp": datetime.now().isoformat(),
+                    "booking_number": em.get("booking_number", ""),
+                    "atividade": em.get("atividade", ""),
+                    "cidade": em.get("cidade", ""),
+                    "cliente": f"{em.get('nome', '')} {em.get('sobrenomes', '')}".strip(),
+                    "num_pessoas": em.get("num_total", 0),
+                    "preco_venda": em.get("preco_venda", ""),
+                    "codigo_lcx": codigo_lcx,
+                    "status": "OK" if result.get("success") else "ERRO",
+                    "sale_id": result.get("sale_id", ""),
+                    "error": result.get("error", ""),
+                    "source": "auto-scan",
+                }
+                launch_log.insert(0, entry)
+
+                if result.get("success"):
+                    launched += 1
+                else:
+                    errors += 1
+
+            summary = f"found={len(new_bookings)} launched={launched} skipped={skipped} errors={errors}"
+            auto_scan_status["last_result"] = summary
+            auto_scan_status["running"] = False
+            print(f"[AUTO-SCAN] {summary}")
+
         except Exception as e:
             auto_scan_status["running"] = False
             auto_scan_status["last_result"] = f"ERROR: {e}"
-            print(f"[BATCH ERROR] {e}")
+            print(f"[AUTO-SCAN ERROR] {e}")
             traceback.print_exc()
-            time.sleep(300)  # wait 5 min before retrying on error
+
+        time.sleep(AUTO_SCAN_INTERVAL)
 
 
 @app.route("/api/auto-scan-status")
@@ -1321,281 +1282,10 @@ def api_auto_scan_status():
     return jsonify(auto_scan_status)
 
 
-# ═══════════════════════════════════════════════════════
-# DAILY SUMMARY EMAIL
-# ═══════════════════════════════════════════════════════
-
-def build_daily_summary(target_date):
-    """Build HTML summary of launches for a specific date."""
-    date_str = target_date.strftime("%Y-%m-%d")
-    day_launches = [l for l in launch_log if l.get("timestamp", "").startswith(date_str)]
-
-    ok = [l for l in day_launches if l.get("status") == "OK"]
-    errors = [l for l in day_launches if l.get("status") == "ERRO"]
-    sem_codigo = [l for l in day_launches if l.get("status") == "SEM_CODIGO"]
-
-    total_valor = 0
-    for l in ok:
-        try:
-            v = str(l.get("preco_venda", "0")).replace(".", "").replace(",", ".")
-            total_valor += float(v)
-        except:
-            pass
-
-    total_pessoas = sum(l.get("num_pessoas", 0) for l in ok)
-
-    # Build HTML
-    html = f"""
-    <div style="font-family:'Segoe UI',sans-serif;max-width:700px;margin:0 auto;background:#0f172a;color:#e2e8f0;border-radius:12px;overflow:hidden;">
-        <div style="background:linear-gradient(135deg,#1e293b,#334155);padding:20px 30px;border-bottom:2px solid #f43f5e;">
-            <h1 style="margin:0;font-size:20px;color:#f8fafc;">🚀 CVT Launcher — Resumo do dia</h1>
-            <p style="margin:5px 0 0;color:#94a3b8;font-size:14px;">{target_date.strftime('%d/%m/%Y')} ({target_date.strftime('%A')})</p>
-        </div>
-
-        <div style="padding:20px 30px;">
-            <div style="display:flex;gap:15px;margin-bottom:20px;">
-                <div style="background:#1e293b;border-radius:10px;padding:15px 20px;flex:1;text-align:center;">
-                    <div style="font-size:28px;font-weight:bold;color:#10b981;">{len(ok)}</div>
-                    <div style="font-size:12px;color:#94a3b8;">Lançadas</div>
-                </div>
-                <div style="background:#1e293b;border-radius:10px;padding:15px 20px;flex:1;text-align:center;">
-                    <div style="font-size:28px;font-weight:bold;color:#3b82f6;">{total_pessoas}</div>
-                    <div style="font-size:12px;color:#94a3b8;">Pessoas</div>
-                </div>
-                <div style="background:#1e293b;border-radius:10px;padding:15px 20px;flex:1;text-align:center;">
-                    <div style="font-size:28px;font-weight:bold;color:#f59e0b;">R$ {total_valor:,.2f}</div>
-                    <div style="font-size:12px;color:#94a3b8;">Valor líquido</div>
-                </div>
-            </div>
-    """
-
-    if errors:
-        html += f'<p style="color:#ef4444;font-size:13px;">⚠️ {len(errors)} venda(s) com erro</p>'
-    if sem_codigo:
-        html += f'<p style="color:#f59e0b;font-size:13px;">⚠️ {len(sem_codigo)} tour(s) sem código LCX mapeado</p>'
-
-    if ok:
-        html += """
-            <table style="width:100%;border-collapse:collapse;margin-top:15px;">
-                <tr style="background:#1e293b;">
-                    <th style="padding:10px;text-align:left;font-size:11px;color:#94a3b8;text-transform:uppercase;">Reserva</th>
-                    <th style="padding:10px;text-align:left;font-size:11px;color:#94a3b8;text-transform:uppercase;">Atividade</th>
-                    <th style="padding:10px;text-align:left;font-size:11px;color:#94a3b8;text-transform:uppercase;">Cliente</th>
-                    <th style="padding:10px;text-align:left;font-size:11px;color:#94a3b8;text-transform:uppercase;">Pessoas</th>
-                    <th style="padding:10px;text-align:left;font-size:11px;color:#94a3b8;text-transform:uppercase;">Código</th>
-                </tr>
-        """
-        for l in ok:
-            html += f"""
-                <tr style="border-bottom:1px solid #1e293b;">
-                    <td style="padding:8px 10px;font-size:13px;">#{l.get('booking_number','')}</td>
-                    <td style="padding:8px 10px;font-size:13px;">{l.get('atividade','')[:40]}</td>
-                    <td style="padding:8px 10px;font-size:13px;">{l.get('cliente','')[:25]}</td>
-                    <td style="padding:8px 10px;font-size:13px;">{l.get('num_pessoas',0)}</td>
-                    <td style="padding:8px 10px;font-size:13px;">{l.get('codigo_lcx','')}</td>
-                </tr>
-            """
-        html += "</table>"
-
-    if not day_launches:
-        html += '<p style="text-align:center;color:#64748b;padding:30px;">Nenhuma reserva processada neste dia.</p>'
-
-    html += """
-        </div>
-        <div style="padding:15px 30px;background:#1e293b;text-align:center;font-size:11px;color:#64748b;">
-            CVT Launcher — Automação Civitatis → LCX | LC Turismo
-        </div>
-    </div>
-    """
-    return html, len(ok), len(errors), len(sem_codigo)
-
-
-def send_daily_summary(target_date):
-    """Send daily summary email via SMTP."""
-    if not GMAIL_EMAIL or not GMAIL_APP_PASSWORD or not SUMMARY_EMAIL_TO:
-        print("[SUMMARY] Missing email credentials, skipping.")
-        return
-
-    html, ok_count, err_count, sem_count = build_daily_summary(target_date)
-    date_label = target_date.strftime('%d/%m/%Y')
-
-    subject = f"🚀 CVT Launcher — {ok_count} venda(s) lançada(s) em {date_label}"
-    if ok_count == 0:
-        subject = f"CVT Launcher — Nenhuma venda em {date_label}"
-
-    msg = MIMEMultipart("alternative")
-    msg["Subject"] = subject
-    msg["From"] = f"CVT Launcher <{GMAIL_EMAIL}>"
-    msg["To"] = SUMMARY_EMAIL_TO
-    msg.attach(MIMEText(html, "html"))
-
-    try:
-        # Try port 587 with STARTTLS first (works on most cloud platforms)
-        try:
-            smtp = smtplib.SMTP("smtp.gmail.com", 587, timeout=30)
-            smtp.ehlo()
-            smtp.starttls()
-            smtp.ehlo()
-            smtp.login(GMAIL_EMAIL, GMAIL_APP_PASSWORD)
-            smtp.send_message(msg)
-            smtp.quit()
-            print(f"[SUMMARY] Email sent via 587/STARTTLS to {SUMMARY_EMAIL_TO}: {subject}")
-        except Exception as e587:
-            print(f"[SUMMARY] Port 587 failed ({e587}), trying 465/SSL...")
-            with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=30) as smtp:
-                smtp.login(GMAIL_EMAIL, GMAIL_APP_PASSWORD)
-                smtp.send_message(msg)
-            print(f"[SUMMARY] Email sent via 465/SSL to {SUMMARY_EMAIL_TO}: {subject}")
-    except Exception as e:
-        print(f"[SUMMARY ERROR] Failed to send: {e}")
-        traceback.print_exc()
-
-
-def daily_summary_worker():
-    """Background thread: send daily summary at SUMMARY_HOUR."""
-    go_live = datetime.strptime(GO_LIVE_DATE, "%Y-%m-%d")
-    last_sent_date = None
-
-    while True:
-        now = datetime.now()
-
-        # Only start after go-live + 1 day (need at least 1 day of data)
-        if now < go_live + timedelta(days=1):
-            time.sleep(3600)
-            continue
-
-        # Send at SUMMARY_HOUR if not already sent today
-        if now.hour >= SUMMARY_HOUR and last_sent_date != now.date():
-            yesterday = (now - timedelta(days=1)).date()
-            target = datetime(yesterday.year, yesterday.month, yesterday.day)
-            print(f"[SUMMARY] Sending summary for {yesterday}...")
-            try:
-                send_daily_summary(target)
-                last_sent_date = now.date()
-            except Exception as e:
-                print(f"[SUMMARY ERROR] {e}")
-                traceback.print_exc()
-
-        time.sleep(600)  # check every 10 min
-
-
-@app.route("/api/send-summary")
-def api_send_summary():
-    """Manually trigger a summary email for yesterday."""
-    yesterday = datetime.now() - timedelta(days=1)
-    target = datetime(yesterday.year, yesterday.month, yesterday.day)
-    send_daily_summary(target)
-    return jsonify({"sent": True, "date": target.strftime("%Y-%m-%d"), "to": SUMMARY_EMAIL_TO})
-
-
-@app.route("/api/send-test-summary")
-def api_send_test_summary():
-    """Send a TEST summary email with fake reservation data (no LCX impact)."""
-    today = datetime.now()
-    date_str = today.strftime("%Y-%m-%d")
-
-    # Fake reservations for simulation
-    fake_launches = [
-        {
-            "timestamp": f"{date_str} 07:05",
-            "booking_number": "CVT-981234",
-            "atividade": "Tour Viña del Mar & Valparaíso",
-            "cliente": "Maria Fernanda dos Santos",
-            "data_atividade": "20/04/2026",
-            "num_pessoas": 3,
-            "preco_venda": "45.000",
-            "codigo_lcx": "VINA-FD",
-            "status": "OK",
-            "source": "batch-test"
-        },
-        {
-            "timestamp": f"{date_str} 07:05",
-            "booking_number": "CVT-981235",
-            "atividade": "Cajón del Maipo & Embalse el Yeso",
-            "cliente": "João Pedro Almeida",
-            "data_atividade": "21/04/2026",
-            "num_pessoas": 2,
-            "preco_venda": "38.000",
-            "codigo_lcx": "CAJON-FD",
-            "status": "OK",
-            "source": "batch-test"
-        },
-        {
-            "timestamp": f"{date_str} 13:02",
-            "booking_number": "CVT-981236",
-            "atividade": "Santiago City Tour Panorâmico",
-            "cliente": "Ana Carolina Ribeiro",
-            "data_atividade": "22/04/2026",
-            "num_pessoas": 4,
-            "preco_venda": "28.000",
-            "codigo_lcx": "SCL-CITY",
-            "status": "OK",
-            "source": "batch-test"
-        },
-        {
-            "timestamp": f"{date_str} 13:02",
-            "booking_number": "CVT-981237",
-            "atividade": "Valle Nevado Snow Day",
-            "cliente": "Roberto Mendes",
-            "data_atividade": "23/04/2026",
-            "num_pessoas": 1,
-            "preco_venda": "55.000",
-            "codigo_lcx": "",
-            "status": "SEM_CODIGO",
-            "source": "batch-test"
-        }
-    ]
-
-    # Build summary with fake data
-    original_log = launch_log.copy()
-    launch_log.extend(fake_launches)
-    html, ok_count, err_count, sem_count = build_daily_summary(today)
-    launch_log.clear()
-    launch_log.extend(original_log)
-
-    date_label = today.strftime('%d/%m/%Y')
-    subject = f"🧪 [TESTE] CVT Launcher — {ok_count} venda(s) simulada(s) em {date_label}"
-
-    msg = MIMEMultipart("alternative")
-    msg["Subject"] = subject
-    msg["From"] = f"CVT Launcher <{GMAIL_EMAIL}>"
-    msg["To"] = SUMMARY_EMAIL_TO
-    msg.attach(MIMEText(html, "html"))
-
-    # Send async so endpoint returns immediately
-    def _send():
-        try:
-            smtp = smtplib.SMTP("smtp.gmail.com", 587, timeout=30)
-            smtp.ehlo()
-            smtp.starttls()
-            smtp.ehlo()
-            smtp.login(GMAIL_EMAIL, GMAIL_APP_PASSWORD)
-            smtp.send_message(msg)
-            smtp.quit()
-            print(f"[TEST] Email sent via 587/STARTTLS to {SUMMARY_EMAIL_TO}")
-        except Exception as e587:
-            print(f"[TEST] Port 587 failed: {e587}")
-            try:
-                with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=30) as s:
-                    s.login(GMAIL_EMAIL, GMAIL_APP_PASSWORD)
-                    s.send_message(msg)
-                print(f"[TEST] Email sent via 465/SSL to {SUMMARY_EMAIL_TO}")
-            except Exception as e465:
-                print(f"[TEST ERROR] Both ports failed. 465 error: {e465}")
-                traceback.print_exc()
-
-    threading.Thread(target=_send, daemon=True).start()
-    return jsonify({"queued": True, "test": True, "ok": ok_count, "sem_codigo": sem_count, "to": SUMMARY_EMAIL_TO, "note": "Check Railway logs for send result"})
-
-
-# Start background threads on app boot
+# Start background thread on app boot
 _scan_thread = threading.Thread(target=auto_scan_worker, daemon=True)
 _scan_thread.start()
-print(f"[AUTO-SCAN] Thread started. Go-live: {GO_LIVE_DATE}, batch hours: {BATCH_HOURS}")
-
-_summary_thread = threading.Thread(target=daily_summary_worker, daemon=True)
-_summary_thread.start()
-print(f"[SUMMARY] Thread started. Sends at {SUMMARY_HOUR}:00 to {SUMMARY_EMAIL_TO}")
+print(f"[AUTO-SCAN] Thread started. Go-live: {GO_LIVE_DATE}, interval: {AUTO_SCAN_INTERVAL}s")
 
 
 if __name__ == "__main__":
