@@ -1546,22 +1546,24 @@ def api_send_test_summary():
         }
     ]
 
-    # Temporarily inject fake data
+    # Build summary with fake data
     original_log = launch_log.copy()
     launch_log.extend(fake_launches)
+    html, ok_count, err_count, sem_count = build_daily_summary(today)
+    launch_log.clear()
+    launch_log.extend(original_log)
 
-    try:
-        html, ok_count, err_count, sem_count = build_daily_summary(today)
-        date_label = today.strftime('%d/%m/%Y')
-        subject = f"🧪 [TESTE] CVT Launcher — {ok_count} venda(s) simulada(s) em {date_label}"
+    date_label = today.strftime('%d/%m/%Y')
+    subject = f"🧪 [TESTE] CVT Launcher — {ok_count} venda(s) simulada(s) em {date_label}"
 
-        msg = MIMEMultipart("alternative")
-        msg["Subject"] = subject
-        msg["From"] = f"CVT Launcher <{GMAIL_EMAIL}>"
-        msg["To"] = SUMMARY_EMAIL_TO
-        msg.attach(MIMEText(html, "html"))
+    msg = MIMEMultipart("alternative")
+    msg["Subject"] = subject
+    msg["From"] = f"CVT Launcher <{GMAIL_EMAIL}>"
+    msg["To"] = SUMMARY_EMAIL_TO
+    msg.attach(MIMEText(html, "html"))
 
-        # Try port 587 with STARTTLS first (works on most cloud platforms)
+    # Send async so endpoint returns immediately
+    def _send():
         try:
             smtp = smtplib.SMTP("smtp.gmail.com", 587, timeout=30)
             smtp.ehlo()
@@ -1570,19 +1572,20 @@ def api_send_test_summary():
             smtp.login(GMAIL_EMAIL, GMAIL_APP_PASSWORD)
             smtp.send_message(msg)
             smtp.quit()
+            print(f"[TEST] Email sent via 587/STARTTLS to {SUMMARY_EMAIL_TO}")
         except Exception as e587:
-            print(f"[TEST] Port 587 failed ({e587}), trying 465/SSL...")
-            with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=30) as smtp:
-                smtp.login(GMAIL_EMAIL, GMAIL_APP_PASSWORD)
-                smtp.send_message(msg)
+            print(f"[TEST] Port 587 failed: {e587}")
+            try:
+                with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=30) as s:
+                    s.login(GMAIL_EMAIL, GMAIL_APP_PASSWORD)
+                    s.send_message(msg)
+                print(f"[TEST] Email sent via 465/SSL to {SUMMARY_EMAIL_TO}")
+            except Exception as e465:
+                print(f"[TEST ERROR] Both ports failed. 465 error: {e465}")
+                traceback.print_exc()
 
-        return jsonify({"sent": True, "test": True, "ok": ok_count, "sem_codigo": sem_count, "to": SUMMARY_EMAIL_TO})
-    except Exception as e:
-        return jsonify({"sent": False, "error": str(e)}), 500
-    finally:
-        # Remove fake data
-        launch_log.clear()
-        launch_log.extend(original_log)
+    threading.Thread(target=_send, daemon=True).start()
+    return jsonify({"queued": True, "test": True, "ok": ok_count, "sem_codigo": sem_count, "to": SUMMARY_EMAIL_TO, "note": "Check Railway logs for send result"})
 
 
 # Start background threads on app boot
