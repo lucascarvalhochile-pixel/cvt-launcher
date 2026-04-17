@@ -1476,6 +1476,92 @@ def api_send_summary():
     return jsonify({"sent": True, "date": target.strftime("%Y-%m-%d"), "to": SUMMARY_EMAIL_TO})
 
 
+@app.route("/api/send-test-summary")
+def api_send_test_summary():
+    """Send a TEST summary email with fake reservation data (no LCX impact)."""
+    today = datetime.now()
+    date_str = today.strftime("%Y-%m-%d")
+
+    # Fake reservations for simulation
+    fake_launches = [
+        {
+            "timestamp": f"{date_str} 07:05",
+            "booking_number": "CVT-981234",
+            "atividade": "Tour Viña del Mar & Valparaíso",
+            "cliente": "Maria Fernanda dos Santos",
+            "data_atividade": "20/04/2026",
+            "num_pessoas": 3,
+            "preco_venda": "45.000",
+            "codigo_lcx": "VINA-FD",
+            "status": "OK",
+            "source": "batch-test"
+        },
+        {
+            "timestamp": f"{date_str} 07:05",
+            "booking_number": "CVT-981235",
+            "atividade": "Cajón del Maipo & Embalse el Yeso",
+            "cliente": "João Pedro Almeida",
+            "data_atividade": "21/04/2026",
+            "num_pessoas": 2,
+            "preco_venda": "38.000",
+            "codigo_lcx": "CAJON-FD",
+            "status": "OK",
+            "source": "batch-test"
+        },
+        {
+            "timestamp": f"{date_str} 13:02",
+            "booking_number": "CVT-981236",
+            "atividade": "Santiago City Tour Panorâmico",
+            "cliente": "Ana Carolina Ribeiro",
+            "data_atividade": "22/04/2026",
+            "num_pessoas": 4,
+            "preco_venda": "28.000",
+            "codigo_lcx": "SCL-CITY",
+            "status": "OK",
+            "source": "batch-test"
+        },
+        {
+            "timestamp": f"{date_str} 13:02",
+            "booking_number": "CVT-981237",
+            "atividade": "Valle Nevado Snow Day",
+            "cliente": "Roberto Mendes",
+            "data_atividade": "23/04/2026",
+            "num_pessoas": 1,
+            "preco_venda": "55.000",
+            "codigo_lcx": "",
+            "status": "SEM_CODIGO",
+            "source": "batch-test"
+        }
+    ]
+
+    # Temporarily inject fake data
+    original_log = launch_log.copy()
+    launch_log.extend(fake_launches)
+
+    try:
+        html, ok_count, err_count, sem_count = build_daily_summary(today)
+        date_label = today.strftime('%d/%m/%Y')
+        subject = f"🧪 [TESTE] CVT Launcher — {ok_count} venda(s) simulada(s) em {date_label}"
+
+        msg = MIMEMultipart("alternative")
+        msg["Subject"] = subject
+        msg["From"] = f"CVT Launcher <{GMAIL_EMAIL}>"
+        msg["To"] = SUMMARY_EMAIL_TO
+        msg.attach(MIMEText(html, "html"))
+
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as smtp:
+            smtp.login(GMAIL_EMAIL, GMAIL_APP_PASSWORD)
+            smtp.send_message(msg)
+
+        return jsonify({"sent": True, "test": True, "ok": ok_count, "sem_codigo": sem_count, "to": SUMMARY_EMAIL_TO})
+    except Exception as e:
+        return jsonify({"sent": False, "error": str(e)}), 500
+    finally:
+        # Remove fake data
+        launch_log.clear()
+        launch_log.extend(original_log)
+
+
 # Start background threads on app boot
 _scan_thread = threading.Thread(target=auto_scan_worker, daemon=True)
 _scan_thread.start()
