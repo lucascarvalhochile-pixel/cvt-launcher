@@ -12,6 +12,7 @@ from email.header import decode_header
 from email.utils import parsedate_to_datetime
 from datetime import datetime, timedelta
 import traceback
+import unicodedata
 import threading
 import time
 import requests
@@ -188,7 +189,7 @@ def load_mapping():
                         names = [n.strip() for n in nome_cvt.split("/")]
                         for name in names:
                             if name:
-                                mapping[name.lower()] = {
+                                mapping[unicodedata.normalize("NFC", name.lower())] = {
                                     "codigo_lcx": codigo_lcx,
                                     "nome_lcx": nome_lcx,
                                 }
@@ -207,7 +208,7 @@ def find_lcx_tour(atividade, codigo_interno):
     if not mapping:
         return None, None
 
-    key = atividade.strip().lower()
+    key = unicodedata.normalize("NFC", atividade.strip().lower())
     # Remove language/tier suffix: " - Tour em português", " - Tour com retirada + ..."
     key_clean = re.sub(r'\s*-\s*tour\s+.*$', '', key, flags=re.IGNORECASE).strip()
 
