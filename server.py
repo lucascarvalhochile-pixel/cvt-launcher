@@ -184,10 +184,14 @@ def load_mapping():
                     codigo_lcx = row[3].strip()
                     nome_lcx = row[4].strip() if len(row) > 4 else ""
                     if nome_cvt and codigo_lcx and not codigo_lcx.startswith("▸"):
-                        mapping[nome_cvt.lower()] = {
-                            "codigo_lcx": codigo_lcx,
-                            "nome_lcx": nome_lcx,
-                        }
+                        # Support multiple names per cell separated by "/"
+                        names = [n.strip() for n in nome_cvt.split("/")]
+                        for name in names:
+                            if name:
+                                mapping[name.lower()] = {
+                                    "codigo_lcx": codigo_lcx,
+                                    "nome_lcx": nome_lcx,
+                                }
             print(f"[SHEETS] Loaded {len(rows)} rows from Google Sheets")
     except Exception as e:
         print(f"[SHEETS] Using hardcoded mapping (Sheets error: {e})")
