@@ -45,7 +45,7 @@ ACTION_UPDATE_SALE_ITEM_STATUS = "60e04b75876ff9dc35df21a885e286e199691081f4"
 
 # Auto-scan config
 AUTO_SCAN_INTERVAL = int(os.environ.get("AUTO_SCAN_INTERVAL", "300"))  # 5 min
-GO_LIVE_DATE = os.environ.get("GO_LIVE_DATE", "2026-04-18")  # only process emails from this date onward
+GO_LIVE_DATE = os.environ.get("GO_LIVE_DATE", "2099-12-31")  # PAUSED — set back to real date after fixing dedup
 auto_scan_status = {"last_run": None, "last_result": None, "running": False}
 
 # ═══════════════════════════════════════════════════════
