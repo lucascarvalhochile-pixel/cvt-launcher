@@ -988,6 +988,15 @@ def api_log():
     return jsonify(launch_log)
 
 
+@app.route("/api/clear-log", methods=["POST"])
+def api_clear_log():
+    """Clear the in-memory launch log. Use after deleting sales from LCX."""
+    global launch_log
+    count = len(launch_log)
+    launch_log = []
+    return jsonify({"cleared": count})
+
+
 @app.route("/api/test-parse", methods=["POST"])
 def api_test_parse():
     """Test email parsing without launching. For development/testing."""
