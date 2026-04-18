@@ -499,6 +499,7 @@ class LCXClient:
 
     def login(self):
         """Login to LCX using NextAuth credentials flow."""
+        self.last_login_error = None
         try:
             # Step 1: Get CSRF token from NextAuth endpoint
             r = self.session.get(f"{LCX_BASE}/api/auth/csrf", timeout=15)
@@ -516,6 +517,7 @@ class LCXClient:
             r = self.session.post(
                 f"{LCX_BASE}/api/auth/callback/credentials",
                 data=login_data,
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
                 timeout=15,
                 allow_redirects=True
             )
@@ -528,6 +530,7 @@ class LCXClient:
                 print(f"[LCX] Logged in as {session_data['user'].get('name', '?')}")
             return self.logged_in
         except Exception as e:
+            self.last_login_error = str(e)
             print(f"[LCX LOGIN ERROR] {e}")
             return False
 
@@ -1001,7 +1004,10 @@ def api_test_parse():
 def api_test_lcx_login():
     """Test LCX login."""
     ok = lcx_client.login()
-    return jsonify({"logged_in": ok})
+    result = {"logged_in": ok}
+    if not ok and hasattr(lcx_client, "last_login_error") and lcx_client.last_login_error:
+        result["error"] = lcx_client.last_login_error
+    return jsonify(result)
 
 
 # ═══════════════════════════════════════════════════════
