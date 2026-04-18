@@ -17,7 +17,7 @@ import threading
 import time
 import requests
 from bs4 import BeautifulSoup
-from flask import Flask, request, jsonify, render_template_string
+from flask import Flask, request, jsonify
 import gspread
 from google.oauth2.service_account import Credentials
 
@@ -42,9 +42,6 @@ ACTION_CREATE_SALE = "40cd3e87175fca4124e52bf099976fe85aeb2ea432"
 ACTION_GET_TOURS = "40edcb7e2887376ec41091a090643acc3971c39c09"
 ACTION_UPDATE_SALE_STATUS = "40e26ca0853df6a6ee31813ceafd6657e8525a7285"
 ACTION_UPDATE_SALE_ITEM_STATUS = "60e04b75876ff9dc35df21a885e286e199691081f4"
-
-# In-memory log of launches
-launch_log = []
 
 # Auto-scan config
 AUTO_SCAN_INTERVAL = int(os.environ.get("AUTO_SCAN_INTERVAL", "300"))  # 5 min
@@ -172,7 +169,7 @@ def load_mapping():
         if GSHEET_CREDS_JSON:
             creds_dict = json.loads(GSHEET_CREDS_JSON)
             creds = Credentials.from_service_account_info(creds_dict, scopes=[
-                "https://www.googleapis.com/auth/spreadsheets.readonly"
+                "https://www.googleapis.com/auth/spreadsheets"
             ])
             gc = gspread.authorize(creds)
             sh = gc.open_by_key(GSHEET_ID)
@@ -849,370 +846,100 @@ def fetch_new_booking_emails(max_results=10, since_hours=24):
 
 
 # ═══════════════════════════════════════════════════════
-# ROUTES
+# PERSISTENT DEDUPLICATION VIA GOOGLE SHEETS
+# ═══════════════════════════════════════════════════════
+# Uses a "Launch Log" worksheet in the same spreadsheet to persist
+# launched booking numbers. Survives Railway deploys (no more duplicates).
+
+_launched_bookings_cache = {"data": set(), "ts": None}
+
+def _get_sheets_client():
+    """Get authenticated gspread client with read/write access."""
+    if not GSHEET_CREDS_JSON:
+        return None
+    try:
+        creds_dict = json.loads(GSHEET_CREDS_JSON)
+        creds = Credentials.from_service_account_info(creds_dict, scopes=[
+            "https://www.googleapis.com/auth/spreadsheets"
+        ])
+        return gspread.authorize(creds)
+    except Exception as e:
+        print(f"[SHEETS] Auth error: {e}")
+        return None
+
+
+def _get_or_create_log_sheet(gc):
+    """Get or create the 'Launch Log' worksheet."""
+    sh = gc.open_by_key(GSHEET_ID)
+    try:
+        ws = sh.worksheet("Launch Log")
+    except gspread.WorksheetNotFound:
+        ws = sh.add_worksheet(title="Launch Log", rows=500, cols=6)
+        ws.update("A1:F1", [["Booking #", "Timestamp", "Código LCX", "Status", "Sale ID", "Atividade"]])
+        print("[SHEETS] Created 'Launch Log' worksheet")
+    return ws
+
+
+def load_launched_bookings():
+    """Load set of already-launched booking numbers from Google Sheets."""
+    now = datetime.now()
+    # Cache for 2 minutes
+    if _launched_bookings_cache["data"] and _launched_bookings_cache["ts"] and (now - _launched_bookings_cache["ts"]).seconds < 120:
+        return _launched_bookings_cache["data"]
+
+    try:
+        gc = _get_sheets_client()
+        if not gc:
+            return _launched_bookings_cache["data"]
+        ws = _get_or_create_log_sheet(gc)
+        rows = ws.col_values(1)  # Column A = booking numbers
+        bookings = set(r.strip() for r in rows[1:] if r.strip())  # Skip header
+        _launched_bookings_cache["data"] = bookings
+        _launched_bookings_cache["ts"] = now
+        print(f"[SHEETS] Loaded {len(bookings)} launched bookings from log")
+        return bookings
+    except Exception as e:
+        print(f"[SHEETS] Error loading launch log: {e}")
+        return _launched_bookings_cache["data"]
+
+
+def record_launch(booking_number, codigo_lcx, status, sale_id, atividade):
+    """Record a launch in the Google Sheets log (persistent)."""
+    try:
+        gc = _get_sheets_client()
+        if not gc:
+            return
+        ws = _get_or_create_log_sheet(gc)
+        ws.append_row([
+            booking_number,
+            datetime.now().isoformat(),
+            codigo_lcx or "",
+            status,
+            sale_id or "",
+            atividade or "",
+        ])
+        # Update cache
+        if status == "OK":
+            _launched_bookings_cache["data"].add(booking_number)
+        print(f"[SHEETS] Recorded launch: #{booking_number} → {status}")
+    except Exception as e:
+        print(f"[SHEETS] Error recording launch: {e}")
+
+
+# ═══════════════════════════════════════════════════════
+# ROUTES (minimal — no panel, only health check + status)
 # ═══════════════════════════════════════════════════════
 
 @app.route("/")
 def index():
-    return render_template_string(PANEL_HTML, launches=launch_log)
-
-
-@app.route("/api/scan", methods=["POST"])
-def api_scan():
-    """Scan Gmail for new Civitatis booking emails."""
-    hours = request.json.get("hours", 24) if request.is_json else 24
-    emails = fetch_new_booking_emails(max_results=20, since_hours=hours)
-
-    new_bookings = [e for e in emails if e.get("type") == "NOVA_RESERVA"]
-    skipped = [e for e in emails if e.get("type") != "NOVA_RESERVA"]
-
+    """Health check — confirms the service is running."""
     return jsonify({
-        "total_found": len(emails),
-        "new_bookings": len(new_bookings),
-        "skipped": len(skipped),
-        "bookings": new_bookings,
+        "service": "CVT Launcher",
+        "status": "running",
+        "auto_scan": auto_scan_status,
+        "go_live": GO_LIVE_DATE,
+        "launched_count": len(_launched_bookings_cache["data"]),
     })
-
-
-@app.route("/api/launch", methods=["POST"])
-def api_launch():
-    """Launch a single sale to LCX from parsed email data."""
-    data = request.json
-    if not data:
-        return jsonify({"error": "No data provided"}), 400
-
-    sale_payload, codigo_lcx = build_lcx_sale(data)
-
-    # Check if we have a valid mapping
-    if not codigo_lcx:
-        entry = {
-            "timestamp": datetime.now().isoformat(),
-            "booking_number": data.get("booking_number", ""),
-            "atividade": data.get("atividade", ""),
-            "cidade": data.get("cidade", ""),
-            "status": "SEM_CODIGO",
-            "error": "Tour não mapeado na planilha",
-            "sale_payload": sale_payload,
-        }
-        launch_log.insert(0, entry)
-        return jsonify({"success": False, "error": "Tour sem código LCX mapeado", "entry": entry})
-
-    # Create sale in LCX
-    result = lcx_client.create_sale(sale_payload)
-
-    # If sale created, update status to CONFIRMED
-    if result.get("success") and result.get("sale_id") and result["sale_id"] not in ("unknown", "pending"):
-        status_result = lcx_client.update_sale_status(result["sale_id"], "CONFIRMED")
-        if not status_result.get("success"):
-            print(f"[WARN] Sale created but status update failed: {status_result.get('error')}")
-
-    entry = {
-        "timestamp": datetime.now().isoformat(),
-        "booking_number": data.get("booking_number", ""),
-        "atividade": data.get("atividade", ""),
-        "cidade": data.get("cidade", ""),
-        "cliente": f"{data.get('nome', '')} {data.get('sobrenomes', '')}".strip(),
-        "num_pessoas": data.get("num_total", 0),
-        "preco_venda": data.get("preco_venda", ""),
-        "codigo_lcx": codigo_lcx,
-        "status": "OK" if result.get("success") else "ERRO",
-        "sale_id": result.get("sale_id", ""),
-        "error": result.get("error", ""),
-    }
-    launch_log.insert(0, entry)
-
-    return jsonify({"success": result.get("success"), "entry": entry, "result": result})
-
-
-@app.route("/api/launch-all", methods=["POST"])
-def api_launch_all():
-    """Scan and launch all new bookings."""
-    hours = request.json.get("hours", 24) if request.is_json else 24
-    emails = fetch_new_booking_emails(max_results=50, since_hours=hours)
-
-    # SAFETY: only process emails received AFTER go-live datetime
-    # This prevents old/already-handled emails from being re-launched
-    go_live = datetime.strptime(GO_LIVE_DATE, "%Y-%m-%d")
-    emails = [e for e in emails if e.get("email_date") and e["email_date"] >= go_live]
-
-    results = []
-    for em in emails:
-        if em.get("type") != "NOVA_RESERVA":
-            continue
-
-        # Check if already launched
-        already = any(
-            l.get("booking_number") == em.get("booking_number") and l.get("status") == "OK"
-            for l in launch_log
-        )
-        if already:
-            results.append({"booking": em.get("booking_number"), "status": "JA_LANCADO"})
-            continue
-
-        sale_payload, codigo_lcx = build_lcx_sale(em)
-
-        if not codigo_lcx:
-            entry = {
-                "timestamp": datetime.now().isoformat(),
-                "booking_number": em.get("booking_number", ""),
-                "atividade": em.get("atividade", ""),
-                "cidade": em.get("cidade", ""),
-                "status": "SEM_CODIGO",
-                "error": "Tour não mapeado",
-            }
-            launch_log.insert(0, entry)
-            results.append({"booking": em.get("booking_number"), "status": "SEM_CODIGO"})
-            continue
-
-        result = lcx_client.create_sale(sale_payload)
-
-        # Update status to CONFIRMED after creation
-        if result.get("success") and result.get("sale_id") and result["sale_id"] not in ("unknown", "pending"):
-            lcx_client.update_sale_status(result["sale_id"], "CONFIRMED")
-
-        entry = {
-            "timestamp": datetime.now().isoformat(),
-            "booking_number": em.get("booking_number", ""),
-            "atividade": em.get("atividade", ""),
-            "cidade": em.get("cidade", ""),
-            "cliente": f"{em.get('nome', '')} {em.get('sobrenomes', '')}".strip(),
-            "num_pessoas": em.get("num_total", 0),
-            "preco_venda": em.get("preco_venda", ""),
-            "codigo_lcx": codigo_lcx,
-            "status": "OK" if result.get("success") else "ERRO",
-            "sale_id": result.get("sale_id", ""),
-            "error": result.get("error", ""),
-        }
-        launch_log.insert(0, entry)
-        results.append({"booking": em.get("booking_number"), "status": entry["status"]})
-
-    return jsonify({"total": len(results), "results": results})
-
-
-@app.route("/api/log")
-def api_log():
-    return jsonify(launch_log)
-
-
-@app.route("/api/clear-log", methods=["POST"])
-def api_clear_log():
-    """Clear the in-memory launch log. Use after deleting sales from LCX."""
-    global launch_log
-    count = len(launch_log)
-    launch_log = []
-    return jsonify({"cleared": count})
-
-
-@app.route("/api/test-parse", methods=["POST"])
-def api_test_parse():
-    """Test email parsing without launching. For development/testing."""
-    hours = request.json.get("hours", 48) if request.is_json else 48
-    emails = fetch_new_booking_emails(max_results=5, since_hours=hours)
-
-    enriched = []
-    for em in emails:
-        if em.get("type") == "NOVA_RESERVA":
-            sale_payload, codigo_lcx = build_lcx_sale(em)
-            em["_lcx_sale_preview"] = sale_payload
-            em["_codigo_lcx"] = codigo_lcx
-        enriched.append(em)
-
-    return jsonify(enriched)
-
-
-@app.route("/api/test-lcx-login")
-def api_test_lcx_login():
-    """Test LCX login."""
-    ok = lcx_client.login()
-    result = {"logged_in": ok}
-    if not ok and hasattr(lcx_client, "last_login_error") and lcx_client.last_login_error:
-        result["error"] = lcx_client.last_login_error
-    return jsonify(result)
-
-
-# ═══════════════════════════════════════════════════════
-# PANEL HTML
-# ═══════════════════════════════════════════════════════
-PANEL_HTML = """<!DOCTYPE html>
-<html lang="pt-BR">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>CVT Launcher — Civitatis → LCX</title>
-<style>
-* { margin:0; padding:0; box-sizing:border-box; }
-body { font-family: 'Segoe UI', system-ui, sans-serif; background:#0f172a; color:#e2e8f0; min-height:100vh; }
-.header { background:linear-gradient(135deg,#1e293b,#334155); padding:20px 30px; display:flex; justify-content:space-between; align-items:center; border-bottom:2px solid #f43f5e; }
-.header h1 { font-size:22px; color:#f8fafc; }
-.header h1 span { color:#f43f5e; }
-.header .badge { background:#f43f5e; color:white; padding:4px 12px; border-radius:20px; font-size:13px; }
-.controls { padding:20px 30px; display:flex; gap:12px; flex-wrap:wrap; }
-.btn { padding:10px 20px; border:none; border-radius:8px; cursor:pointer; font-size:14px; font-weight:600; transition:all .2s; }
-.btn-primary { background:#3b82f6; color:white; }
-.btn-primary:hover { background:#2563eb; }
-.btn-success { background:#10b981; color:white; }
-.btn-success:hover { background:#059669; }
-.btn-warning { background:#f59e0b; color:#1e293b; }
-.btn-warning:hover { background:#d97706; }
-.btn-danger { background:#ef4444; color:white; }
-.status-bar { padding:10px 30px; font-size:13px; color:#94a3b8; }
-.table-wrap { padding:0 30px 30px; overflow-x:auto; }
-table { width:100%; border-collapse:collapse; }
-th { background:#1e293b; color:#94a3b8; font-size:12px; text-transform:uppercase; padding:12px 15px; text-align:left; position:sticky; top:0; }
-td { padding:10px 15px; border-bottom:1px solid #1e293b; font-size:13px; }
-tr:hover { background:#1e293b40; }
-.badge-ok { background:#10b981; color:white; padding:3px 10px; border-radius:12px; font-size:11px; font-weight:600; }
-.badge-erro { background:#ef4444; color:white; padding:3px 10px; border-radius:12px; font-size:11px; font-weight:600; }
-.badge-sem { background:#f59e0b; color:#1e293b; padding:3px 10px; border-radius:12px; font-size:11px; font-weight:600; }
-.empty { text-align:center; padding:60px; color:#64748b; }
-.toast { position:fixed; top:20px; right:20px; background:#1e293b; border:1px solid #334155; border-radius:10px; padding:15px 20px; display:none; z-index:999; max-width:400px; box-shadow:0 4px 20px rgba(0,0,0,.4); }
-#scanResults { padding:0 30px; }
-.scan-card { background:#1e293b; border-radius:10px; padding:15px; margin:8px 0; display:flex; justify-content:space-between; align-items:center; }
-.scan-card .info { flex:1; }
-.scan-card .info h4 { color:#f8fafc; font-size:14px; }
-.scan-card .info p { color:#94a3b8; font-size:12px; margin-top:4px; }
-</style>
-</head>
-<body>
-<div class="header">
-    <h1>🚀 <span>CVT</span> Launcher <small style="color:#94a3b8;font-size:13px">Civitatis → LCX</small></h1>
-    <div class="badge" id="counter">{{ launches|length }} lançamentos</div>
-</div>
-
-<div class="controls">
-    <button class="btn btn-primary" onclick="scanEmails()">📧 Escanear Emails (24h)</button>
-    <button class="btn btn-success" onclick="launchAll()">🚀 Lançar Tudo</button>
-    <button class="btn btn-warning" onclick="testParse()">🔍 Test Parse</button>
-    <button class="btn btn-primary" onclick="testLogin()">🔑 Test Login LCX</button>
-</div>
-
-<div class="status-bar" id="statusBar">Pronto. Clique em "Escanear Emails" para buscar novas reservas.</div>
-
-<div id="scanResults"></div>
-
-<div class="table-wrap">
-<table>
-<thead>
-<tr>
-    <th>Data/Hora</th>
-    <th>Reserva</th>
-    <th>Atividade</th>
-    <th>Cidade</th>
-    <th>Cliente</th>
-    <th>Pessoas</th>
-    <th>Valor</th>
-    <th>Código LCX</th>
-    <th>Status</th>
-    <th>Sale ID</th>
-</tr>
-</thead>
-<tbody id="logBody">
-{% for l in launches %}
-<tr>
-    <td>{{ l.timestamp[:16] }}</td>
-    <td>{{ l.booking_number }}</td>
-    <td>{{ l.atividade[:40] }}</td>
-    <td>{{ l.cidade }}</td>
-    <td>{{ l.get('cliente','') }}</td>
-    <td>{{ l.get('num_pessoas','') }}</td>
-    <td>R$ {{ l.get('preco_venda','') }}</td>
-    <td>{{ l.get('codigo_lcx','—') }}</td>
-    <td><span class="badge-{{ 'ok' if l.status=='OK' else 'erro' if l.status=='ERRO' else 'sem' }}">{{ l.status }}</span></td>
-    <td>{{ l.get('sale_id','')[:12] }}</td>
-</tr>
-{% endfor %}
-{% if not launches %}
-<tr><td colspan="10" class="empty">Nenhum lançamento ainda. Escaneie os emails para começar.</td></tr>
-{% endif %}
-</tbody>
-</table>
-</div>
-
-<div class="toast" id="toast"></div>
-
-<script>
-function showStatus(msg) {
-    document.getElementById('statusBar').textContent = msg;
-}
-
-function showToast(msg, duration=3000) {
-    const t = document.getElementById('toast');
-    t.textContent = msg;
-    t.style.display = 'block';
-    setTimeout(() => t.style.display = 'none', duration);
-}
-
-async function scanEmails() {
-    showStatus('Escaneando emails da Civitatis...');
-    try {
-        const r = await fetch('/api/scan', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({hours:24})});
-        const data = await r.json();
-        showStatus(`Encontrados: ${data.total_found} emails | ${data.new_bookings} novas reservas | ${data.skipped} ignorados`);
-
-        const container = document.getElementById('scanResults');
-        container.innerHTML = '';
-        if (data.bookings) {
-            data.bookings.forEach(b => {
-                container.innerHTML += `
-                <div class="scan-card">
-                    <div class="info">
-                        <h4>#${b.booking_number} — ${b.atividade || 'N/A'}</h4>
-                        <p>${b.cidade || ''} | ${b.data_tour || ''} | ${b.nome || ''} ${b.sobrenomes || ''} | R$ ${b.preco_venda || '0'}</p>
-                    </div>
-                    <button class="btn btn-success" onclick="launchOne(${JSON.stringify(b).replace(/"/g, '&quot;')})">Lançar</button>
-                </div>`;
-            });
-        }
-    } catch(e) { showStatus('Erro: ' + e.message); }
-}
-
-async function launchOne(data) {
-    showStatus('Lançando venda no LCX...');
-    try {
-        const r = await fetch('/api/launch', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(data)});
-        const res = await r.json();
-        showStatus(res.success ? `✅ Venda lançada! ID: ${res.entry?.sale_id}` : `❌ Erro: ${res.error}`);
-        showToast(res.success ? '✅ Lançado com sucesso!' : '❌ ' + res.error);
-        location.reload();
-    } catch(e) { showStatus('Erro: ' + e.message); }
-}
-
-async function launchAll() {
-    if (!confirm('Lançar TODAS as novas reservas das últimas 24h?')) return;
-    showStatus('Lançando todas as reservas...');
-    try {
-        const r = await fetch('/api/launch-all', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({hours:24})});
-        const data = await r.json();
-        showStatus(`Processadas: ${data.total} reservas`);
-        showToast(`${data.total} reservas processadas`);
-        location.reload();
-    } catch(e) { showStatus('Erro: ' + e.message); }
-}
-
-async function testParse() {
-    showStatus('Testando parse dos emails...');
-    try {
-        const r = await fetch('/api/test-parse', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({hours:48})});
-        const data = await r.json();
-        showStatus(`Parse test: ${data.length} emails processados`);
-        console.log('Parse results:', data);
-        showToast(`${data.length} emails parseados — veja o console (F12)`);
-    } catch(e) { showStatus('Erro: ' + e.message); }
-}
-
-async function testLogin() {
-    showStatus('Testando login no LCX...');
-    try {
-        const r = await fetch('/api/test-lcx-login');
-        const data = await r.json();
-        showStatus(data.logged_in ? '✅ Login LCX OK!' : '❌ Login LCX falhou');
-        showToast(data.logged_in ? '✅ Login OK' : '❌ Login falhou');
-    } catch(e) { showStatus('Erro: ' + e.message); }
-}
-</script>
-</body>
-</html>
-"""
 
 # ═══════════════════════════════════════════════════════
 # AUTO-SCAN BACKGROUND WORKER
@@ -1247,27 +974,21 @@ def auto_scan_worker():
             skipped = 0
             errors = 0
 
+            # Load already-launched bookings from Google Sheets (persistent!)
+            launched_bookings = load_launched_bookings()
+
             for em in new_bookings:
-                already = any(
-                    l.get("booking_number") == em.get("booking_number") and l.get("status") == "OK"
-                    for l in launch_log
-                )
-                if already:
+                booking_num = em.get("booking_number", "")
+
+                # PERSISTENT dedup: check Google Sheets log, not in-memory
+                if booking_num in launched_bookings:
                     skipped += 1
                     continue
 
                 sale_payload, codigo_lcx = build_lcx_sale(em)
 
                 if not codigo_lcx:
-                    entry = {
-                        "timestamp": datetime.now().isoformat(),
-                        "booking_number": em.get("booking_number", ""),
-                        "atividade": em.get("atividade", ""),
-                        "cidade": em.get("cidade", ""),
-                        "status": "SEM_CODIGO",
-                        "error": "Tour não mapeado",
-                    }
-                    launch_log.insert(0, entry)
+                    record_launch(booking_num, "", "SEM_CODIGO", "", em.get("atividade", ""))
                     errors += 1
                     continue
 
@@ -1276,21 +997,11 @@ def auto_scan_worker():
                 if result.get("success") and result.get("sale_id") and result["sale_id"] not in ("unknown", "pending"):
                     lcx_client.update_sale_status(result["sale_id"], "CONFIRMED")
 
-                entry = {
-                    "timestamp": datetime.now().isoformat(),
-                    "booking_number": em.get("booking_number", ""),
-                    "atividade": em.get("atividade", ""),
-                    "cidade": em.get("cidade", ""),
-                    "cliente": f"{em.get('nome', '')} {em.get('sobrenomes', '')}".strip(),
-                    "num_pessoas": em.get("num_total", 0),
-                    "preco_venda": em.get("preco_venda", ""),
-                    "codigo_lcx": codigo_lcx,
-                    "status": "OK" if result.get("success") else "ERRO",
-                    "sale_id": result.get("sale_id", ""),
-                    "error": result.get("error", ""),
-                    "source": "auto-scan",
-                }
-                launch_log.insert(0, entry)
+                status = "OK" if result.get("success") else "ERRO"
+                sale_id = result.get("sale_id", "")
+
+                # Record in Google Sheets (survives deploys!)
+                record_launch(booking_num, codigo_lcx, status, sale_id, em.get("atividade", ""))
 
                 if result.get("success"):
                     launched += 1
