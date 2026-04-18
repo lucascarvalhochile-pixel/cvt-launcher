@@ -189,7 +189,8 @@ def load_mapping():
                         names = [n.strip() for n in nome_cvt.split("/")]
                         for name in names:
                             if name:
-                                mapping[unicodedata.normalize("NFC", name.lower())] = {
+                                clean = re.sub(r'\s*-\s*tour\s+.*$', '', unicodedata.normalize("NFC", name.lower()), flags=re.IGNORECASE).strip()
+                                mapping[clean] = {
                                     "codigo_lcx": codigo_lcx,
                                     "nome_lcx": nome_lcx,
                                 }
