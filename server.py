@@ -599,11 +599,12 @@ class LCXClient:
             return {"success": False, "error": str(e)}
 
     def booking_exists(self, booking_number):
-        """Check if a CVT booking already exists in LCX by searching for *cvt* #BOOKING."""
+        """Check if a CVT booking already exists in LCX by searching for *cvt* #BOOKING.
+        FAIL-CLOSED: if we can't check, return True (assume exists) to prevent duplicates."""
         if not self.logged_in:
             if not self.login():
-                print(f"[LCX] Cannot check booking #{booking_number} â login failed")
-                return False  # fail-open: allow launch if we can't check
+                print(f"[LCX-DEDUP] Cannot check booking #{booking_number} â login failed, BLOCKING launch")
+                return True  # FAIL-CLOSED: don't create if we can't verify
         try:
             r = self.session.get(
                 f"{LCX_BASE}/dashboard/vendas?search={booking_number}",
@@ -617,11 +618,14 @@ class LCXClient:
                 exists = has_sale and has_booking
                 if exists:
                     print(f"[LCX-DEDUP] Booking #{booking_number} ALREADY EXISTS in LCX â skipping")
+                else:
+                    print(f"[LCX-DEDUP] Booking #{booking_number} NOT found in LCX â will create")
                 return exists
-            return False
+            print(f"[LCX-DEDUP] HTTP {r.status_code} checking #{booking_number} â BLOCKING launch")
+            return True  # FAIL-CLOSED
         except Exception as e:
-            print(f"[LCX-DEDUP] Error checking booking #{booking_number}: {e}")
-            return False  # fail-open
+            print(f"[LCX-DEDUP] Error checking booking #{booking_number}: {e} â BLOCKING launch")
+            return True  # FAIL-CLOSED: don't create if we can't verify
 
 
 lcx_client = LCXClient()
@@ -1004,8 +1008,17 @@ def auto_scan_worker():
             skipped = 0
             errors = 0
 
-            # Load already-launched bookings from Google Sheets (persistent!)
+            # Load already-launched bookings from in-memory cache
             launched_bookings = load_launched_bookings()
+
+            # CRITICAL: ensure LCX login BEFORE processing any bookings
+            if not lcx_client.logged_in:
+                if not lcx_client.login():
+                    print("[AUTO-SCAN] LCX login failed â aborting this scan to prevent duplicates")
+                    auto_scan_status["last_result"] = f"found={len(new_bookings)} ABORTED: LCX login failed"
+                    auto_scan_status["running"] = False
+                    time.sleep(AUTO_SCAN_INTERVAL)
+                    continue
 
             for em in new_bookings:
                 booking_num = em.get("booking_number", "")
