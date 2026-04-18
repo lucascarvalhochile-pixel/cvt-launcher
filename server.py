@@ -924,6 +924,11 @@ def api_launch_all():
     hours = request.json.get("hours", 24) if request.is_json else 24
     emails = fetch_new_booking_emails(max_results=50, since_hours=hours)
 
+    # SAFETY: only process emails received AFTER go-live datetime
+    # This prevents old/already-handled emails from being re-launched
+    go_live = datetime.strptime(GO_LIVE_DATE, "%Y-%m-%d")
+    emails = [e for e in emails if e.get("email_date") and e["email_date"] >= go_live]
+
     results = []
     for em in emails:
         if em.get("type") != "NOVA_RESERVA":
