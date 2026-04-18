@@ -9,6 +9,7 @@ import json
 import imaplib
 import email as email_lib
 from email.header import decode_header
+from email.utils import parsedate_to_datetime
 from datetime import datetime, timedelta
 import traceback
 import threading
@@ -822,6 +823,11 @@ def fetch_new_booking_emails(max_results=10, since_hours=24):
                 parsed = parse_civitatis_email(msg)
                 if parsed:
                     parsed["email_id"] = eid.decode()
+                    # Extract email received date for filtering
+                    try:
+                        parsed["email_date"] = parsedate_to_datetime(msg["Date"]).replace(tzinfo=None)
+                    except Exception:
+                        parsed["email_date"] = None
                     results.append(parsed)
 
         mail.close()
@@ -1207,6 +1213,9 @@ def auto_scan_worker():
             hours_since_live = max(hours_since_live, 1)
 
             emails = fetch_new_booking_emails(max_results=50, since_hours=int(hours_since_live) + 1)
+            # SAFETY: only process emails received AFTER go-live datetime
+            # This prevents old emails from being launched on first run
+            emails = [e for e in emails if e.get("email_date") and e["email_date"] >= go_live]
             new_bookings = [e for e in emails if e.get("type") == "NOVA_RESERVA"]
             launched = 0
             skipped = 0
