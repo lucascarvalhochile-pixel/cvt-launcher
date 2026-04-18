@@ -890,10 +890,13 @@ def load_launched_bookings():
     try:
         gc = _get_sheets_client()
         if not gc:
+            print("[SHEETS] No client — using in-memory cache only")
             return _launched_bookings_cache["data"]
         ws = _get_or_create_log_sheet(gc)
         rows = ws.col_values(1)  # Column A = booking numbers
         bookings = set(r.strip() for r in rows[1:] if r.strip())  # Skip header
+        # Merge with in-memory cache (keeps bookings from failed writes)
+        bookings = bookings | _launched_bookings_cache["data"]
         _launched_bookings_cache["data"] = bookings
         _launched_bookings_cache["ts"] = now
         print(f"[SHEETS] Loaded {len(bookings)} launched bookings from log")
@@ -905,9 +908,13 @@ def load_launched_bookings():
 
 def record_launch(booking_number, codigo_lcx, status, sale_id, atividade):
     """Record a launch in the Google Sheets log (persistent)."""
+    # ALWAYS update in-memory cache first (survives Sheets errors)
+    _launched_bookings_cache["data"].add(booking_number)
+
     try:
         gc = _get_sheets_client()
         if not gc:
+            print(f"[SHEETS] No client — cached only: #{booking_number} → {status}")
             return
         ws = _get_or_create_log_sheet(gc)
         ws.append_row([
@@ -918,12 +925,9 @@ def record_launch(booking_number, codigo_lcx, status, sale_id, atividade):
             sale_id or "",
             atividade or "",
         ])
-        # Update cache
-        if status == "OK":
-            _launched_bookings_cache["data"].add(booking_number)
         print(f"[SHEETS] Recorded launch: #{booking_number} → {status}")
     except Exception as e:
-        print(f"[SHEETS] Error recording launch: {e}")
+        print(f"[SHEETS] Error recording launch (cached in memory): {e}")
 
 
 # ═══════════════════════════════════════════════════════
