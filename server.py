@@ -95,6 +95,7 @@ HARDCODED_MAPPING = {
     "excursiÃ³n al parque safari de rancagua": {"codigo_lcx": "CHISAN071", "nome_lcx": "SafÃ¡ri Rancagua"},
     "excursiÃ³n al valle nevado al atardecer": {"codigo_lcx": "CHISAN059", "nome_lcx": "Cordilheira Sunset - VerÃ£o"},
     "excursiÃ³n al viÃ±edo alyan al atardecer": {"codigo_lcx": "CHISAN107", "nome_lcx": "VinÃ­cola Alyan"},
+    "excursÃ£o Ã  vinÃ­cola alyan ao entardecer": {"codigo_lcx": "CHISAN107", "nome_lcx": "VinÃ­cola Alyan"},
     "excursÃ£o a isla negra, algarrobo e viÃ±a undurraga": {"codigo_lcx": "CHISAN061", "nome_lcx": "Isla Negra, Algarrobo e Undurraga"},
     "excursÃ£o a valparaÃ­so e viÃ±a del mar": {"codigo_lcx": "CHISAN106", "nome_lcx": "ViÃ±a del Mar e Valparaiso"},
     "excursÃ£o ao cajÃ³n del maipo de moto de neve": {"codigo_lcx": "CHISAN062", "nome_lcx": "Moto Neve em CajÃ³n Del Maipo"},
