@@ -669,12 +669,14 @@ def build_lcx_sale(parsed_email):
         data.get("codigo_interno", "")
     )
 
-    # Customer name: full name of first passenger + *cvt* + booking number
-    if data.get("passageiros") and data["passageiros"][0].get("name"):
+    # Customer name: booking OWNER (Dados do cliente) + *cvt* + booking number
+    # Priority: 1) Dados do cliente (nome + sobrenomes), 2) Passenger 1 fallback
+    owner_name = f"{data.get('nome', '')} {data.get('sobrenomes', '')}".strip()
+    if owner_name:
+        customer_name = owner_name
+    elif data.get("passageiros") and data["passageiros"][0].get("name"):
         customer_name = data["passageiros"][0]["name"].strip()
     else:
-        customer_name = f"{data.get('nome', '')} {data.get('sobrenomes', '')}".strip()
-    if not customer_name:
         customer_name = "Cliente Civitatis"
     booking_num = data.get("booking_number", "")
     customer_name += f" *cvt* #{booking_num}" if booking_num else " *cvt*"
