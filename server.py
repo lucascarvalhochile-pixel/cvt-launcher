@@ -1038,7 +1038,8 @@ def auto_scan_worker():
                 sale_payload, codigo_lcx = build_lcx_sale(em)
 
                 if not codigo_lcx:
-                    record_launch(booking_num, "", "SEM_CODIGO", "", em.get("atividade", ""))
+                    # DON'T cache SEM_CODIGO — allow retry when mapping is added later
+                    print(f"[AUTO-SCAN] Booking #{'{'}booking_num{'}'} has no tour mapping: {'{'}em.get('atividade', ''){'}'} — will retry next scan")
                     errors += 1
                     continue
 
