@@ -35,6 +35,7 @@ GMAIL_APP_PASSWORD = os.environ.get("GMAIL_APP_PASSWORD", "")
 GMAIL_IMAP_HOST = "imap.gmail.com"
 
 GSHEET_ID = os.environ.get("GSHEET_ID", "1dgMKZ31puupdU5VbzjfAPg8O_gdZfO7DDMaoMP5PAqQ")
+TRACKER_SHEET_ID = "1qDnTjA2vySipZy-xy-NBC-TB1Snf1TTjAakJt0_0Dzw"
 GSHEET_CREDS_JSON = os.environ.get("GSHEET_CREDS_JSON", "")
 
 # Server action IDs (reverse-engineered from LCX)
@@ -984,6 +985,42 @@ def record_launch(booking_number, codigo_lcx, status, sale_id, atividade):
 # ROUTES (minimal â no panel, only health check + status)
 # âââââââââââââââââââââââââââââââââââââââââââââââââââââââ
 
+def record_to_tracker(em, codigo_lcx, sale_id):
+    """Write launched sale to Lucas's tracker Google Sheet in real-time."""
+    try:
+        gc = _get_sheets_client()
+        if not gc:
+            print("[TRACKER] No Sheets client")
+            return
+        sh = gc.open_by_key(TRACKER_SHEET_ID)
+        try:
+            ws = sh.worksheet("Lancamentos CVT")
+        except Exception:
+            ws = sh.add_worksheet(title="Lancamentos CVT", rows=500, cols=13)
+            ws.update("A1:M1", [["Booking #", "Email Recebido", "Cliente (Dono Reserva)", "Passeio", "Cidade", "Data Tour", "Hora", "Pax", "Preco Venda (R$)", "Preco Liquido (R$)", "Codigo LCX", "Sale ID", "Status"]])
+            ws.format("A1:M1", {"textFormat": {"bold": True}})
+        bn = em.get("booking_number", "")
+        nome = em.get("nome", "")
+        sobrenomes = em.get("sobrenomes", "")
+        cliente = f"{nome} {sobrenomes}".strip() or em.get("nome_completo", "")
+        pax = f"{em.get('num_adults', 0)}A"
+        if em.get("num_children", 0) > 0:
+            pax += f"+{em['num_children']}C"
+        email_dt = em.get("email_date")
+        email_str = email_dt.strftime("%Y-%m-%d %H:%M") if email_dt else ""
+        ws.append_row([
+            bn, email_str, cliente,
+            em.get("atividade", ""), em.get("cidade", ""),
+            em.get("data_tour", ""), em.get("hora", ""),
+            pax,
+            em.get("preco_venda", 0), em.get("preco_liquido", 0),
+            codigo_lcx or "", sale_id or "", "OK"
+        ])
+        print(f"[TRACKER] Recorded #{bn} to tracker sheet")
+    except Exception as e:
+        print(f"[TRACKER] Error writing to tracker: {e}")
+
+
 @app.route("/")
 def index():
     """Health check â confirms the service is running."""
@@ -1065,6 +1102,7 @@ def auto_scan_worker():
 
                 if result.get("success") and result.get("sale_id") and result["sale_id"] not in ("unknown", "pending"):
                     lcx_client.update_sale_status(result["sale_id"], "CONFIRMED")
+                    record_to_tracker(em, codigo_lcx, result["sale_id"])
 
                 status = "OK" if result.get("success") else "ERRO"
                 sale_id = result.get("sale_id", "")
