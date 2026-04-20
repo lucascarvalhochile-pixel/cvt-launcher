@@ -1,5 +1,5 @@
 """
-CVT Launcher â Civitatis â LCX Automatic Sales Launcher
+CVT Launcher — Civitatis → LCX Automatic Sales Launcher
 Microservice to parse Civitatis new booking emails and create sales in LCX.
 """
 
@@ -23,9 +23,9 @@ from google.oauth2.service_account import Credentials
 
 app = Flask(__name__)
 
-# âââââââââââââââââââââââââââââââââââââââââââââââââââââââ
+# ═══════════════════════════════════════════════════════
 # CONFIG
-# âââââââââââââââââââââââââââââââââââââââââââââââââââââââ
+# ═══════════════════════════════════════════════════════
 LCX_BASE = "https://app.lucascarvalhoturismo.com.br"
 LCX_EMAIL = os.environ.get("LCX_EMAIL", "b2b@lucascarvalhoturismo.com.br")
 LCX_PASSWORD = os.environ.get("LCX_PASSWORD", "")
@@ -49,20 +49,27 @@ AUTO_SCAN_INTERVAL = int(os.environ.get("AUTO_SCAN_INTERVAL", "300"))  # 5 min
 GO_LIVE_DATE = os.environ.get("GO_LIVE_DATE", "2026-04-18")  # Dedup now via LCX search (no Google Sheets needed)
 auto_scan_status = {"last_run": None, "last_result": None, "running": False}
 
-# âââââââââââââââââââââââââââââââââââââââââââââââââââââââ
-# CITY â COUNTRY MAPPING
-# âââââââââââââââââââââââââââââââââââââââââââââââââââââââ
+# Error alerting config
+CONSECUTIVE_ERROR_THRESHOLD = 3  # Alert after N consecutive scan errors
+_consecutive_errors = 0
+
+# Daily summary config
+DAILY_SUMMARY_HOUR = 8  # Send summary at 8 AM (America/Sao_Paulo)
+
+# ═══════════════════════════════════════════════════════
+# CITY → COUNTRY MAPPING
+# ═══════════════════════════════════════════════════════
 CITY_COUNTRY = {
     "santiago": ("Chile", "Santiago"),
     "santiago de chile": ("Chile", "Santiago"),
     "san pedro de atacama": ("Chile", "Atacama"),
     "atacama": ("Chile", "Atacama"),
-    "valparaÃ­so": ("Chile", "Santiago"),
-    "viÃ±a del mar": ("Chile", "Santiago"),
-    "cartagena": ("ColÃ´mbia", "Cartagena"),
-    "cartagena de indias": ("ColÃ´mbia", "Cartagena"),
-    "san andrÃ©s": ("ColÃ´mbia", "San Andres"),
-    "san andres": ("ColÃ´mbia", "San Andres"),
+    "valparaíso": ("Chile", "Santiago"),
+    "viña del mar": ("Chile", "Santiago"),
+    "cartagena": ("Colômbia", "Cartagena"),
+    "cartagena de indias": ("Colômbia", "Cartagena"),
+    "san andrés": ("Colômbia", "San Andres"),
+    "san andres": ("Colômbia", "San Andres"),
     "lima": ("Peru", "Lima"),
     "cusco": ("Peru", "Cusco"),
     "cuzco": ("Peru", "Cusco"),
@@ -82,101 +89,89 @@ def resolve_country_city(raw_city):
     return ("", raw_city)
 
 
-# âââââââââââââââââââââââââââââââââââââââââââââââââââââââ
-# GOOGLE SHEETS â READ MAPPING TABLE
-# âââââââââââââââââââââââââââââââââââââââââââââââââââââââ
-# âââââââââââââââââââââââââââââââââââââââââââââââââââââââ
+# ═══════════════════════════════════════════════════════
+# GOOGLE SHEETS — READ MAPPING TABLE
+# ═══════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════
 # HARDCODED MAPPING (fallback when Google Sheets is unavailable)
 # Source: planilha mapeamento-civitatis-lcx da Karina
-# âââââââââââââââââââââââââââââââââââââââââââââââââââââââ
+# ═══════════════════════════════════════════════════════
 HARDCODED_MAPPING = {
     # Santiago (19+)
-    "estaÃ§Ã£o de esqui portillo e laguna del inca": {"codigo_lcx": "CHISAN067", "nome_lcx": "Portillo e Laguna del Inca"},
-    "excursiÃ³n a las termas de colina y el embalse el yeso": {"codigo_lcx": "CHISAN040", "nome_lcx": "CajÃ³n Del Maipo, Embalse El Yeso e Termas de Colina"},
-    "excursiÃ³n al parque safari de rancagua": {"codigo_lcx": "CHISAN071", "nome_lcx": "SafÃ¡ri Rancagua"},
-    "excursiÃ³n al valle nevado al atardecer": {"codigo_lcx": "CHISAN059", "nome_lcx": "Cordilheira Sunset - VerÃ£o"},
-    "excursiÃ³n al viÃ±edo alyan al atardecer": {"codigo_lcx": "CHISAN107", "nome_lcx": "VinÃ­cola Alyan"},
-    "excursÃ£o Ã  vinÃ­cola alyan ao entardecer": {"codigo_lcx": "CHISAN107", "nome_lcx": "VinÃ­cola Alyan"},
-    "excursÃ£o a isla negra, algarrobo e viÃ±a undurraga": {"codigo_lcx": "CHISAN061", "nome_lcx": "Isla Negra, Algarrobo e Undurraga"},
-    "excursÃ£o a valparaÃ­so e viÃ±a del mar": {"codigo_lcx": "CHISAN106", "nome_lcx": "ViÃ±a del Mar e Valparaiso"},
-    "excursÃ£o ao cajÃ³n del maipo de moto de neve": {"codigo_lcx": "CHISAN062", "nome_lcx": "Moto Neve em CajÃ³n Del Maipo"},
-    "excursÃ£o ao parque de farellones": {"codigo_lcx": "CHISAN034", "nome_lcx": "Andes Full Day - Farellones"},
-    "excursÃ£o ao valle nevado": {"codigo_lcx": "CHISAN1682", "nome_lcx": "Andes Full Day - Valle Nevado"},
-    "excursÃ£o Ã  vinÃ­cola undurraga": {"codigo_lcx": "CHISAN116", "nome_lcx": "VinÃ­cola Undurraga - Tarde"},
-    "excursÃ£o Ã  estaÃ§Ã£o de esqui el colorado": {"codigo_lcx": "CHISAN6706", "nome_lcx": "Andes Full Day - El Colorado"},
-    "excursÃ£o Ã s termas valle de colina": {"codigo_lcx": "CHISAN039", "nome_lcx": "CajÃ³n Del Maipo e Termas de Colina"},
-    "tour de neve por farellones e valle nevado": {"codigo_lcx": "CHISAN035", "nome_lcx": "Andes PanorÃ¢mico"},
-    "tour do vinho casillero del diablo na vinÃ­cola concha y toro": {"codigo_lcx": "CHISAN111", "nome_lcx": "VinÃ­cola Concha y Toro Noturno"},
-    "visita guiada pelo centro histÃ³rico de santiago": {"codigo_lcx": "CHISAN055", "nome_lcx": "City Tour Santiago"},
-    "visita Ã  vinÃ­cola haras de pirque": {"codigo_lcx": "CHISAN113", "nome_lcx": "VinÃ­cola Haras de Pirque Sunset"},
-    # Concha y Toro â multiple tiers (matched by cÃ³digo interno)
-    "experiÃªncia centro do vinho concha y toro": {"codigo_lcx": "CHISAN109", "nome_lcx": "Centro del Vinho Concha y Toro - ManhÃ£"},
-    "experiÃªncia marquÃ©s de casa concha": {"codigo_lcx": "CHISAN110", "nome_lcx": "VinÃ­cola Concha y Toro Tour do MarquÃ©s - ManhÃ£"},
+    "estação de esqui portillo e laguna del inca": {"codigo_lcx": "CHISAN067", "nome_lcx": "Portillo e Laguna del Inca"},
+    "excursión a las termas de colina y el embalse el yeso": {"codigo_lcx": "CHISAN040", "nome_lcx": "Cajón Del Maipo, Embalse El Yeso e Termas de Colina"},
+    "excursión al parque safari de rancagua": {"codigo_lcx": "CHISAN071", "nome_lcx": "Safári Rancagua"},
+    "excursión al valle nevado al atardecer": {"codigo_lcx": "CHISAN059", "nome_lcx": "Cordilheira Sunset - Verão"},
+    "excursión al viñedo alyan al atardecer": {"codigo_lcx": "CHISAN107", "nome_lcx": "Vinícola Alyan"},
+    "excursão à vinícola alyan ao entardecer": {"codigo_lcx": "CHISAN107", "nome_lcx": "Vinícola Alyan"},
+    "excursão a isla negra, algarrobo e viña undurraga": {"codigo_lcx": "CHISAN061", "nome_lcx": "Isla Negra, Algarrobo e Undurraga"},
+    "excursão a valparaíso e viña del mar": {"codigo_lcx": "CHISAN106", "nome_lcx": "Viña del Mar e Valparaiso"},
+    "excursão ao cajón del maipo de moto de neve": {"codigo_lcx": "CHISAN062", "nome_lcx": "Moto Neve em Cajón Del Maipo"},
+    "excursão ao parque de farellones": {"codigo_lcx": "CHISAN034", "nome_lcx": "Andes Full Day - Farellones"},
+    "excursão ao valle nevado": {"codigo_lcx": "CHISAN1682", "nome_lcx": "Andes Full Day - Valle Nevado"},
+    "excursão à vinícola undurraga": {"codigo_lcx": "CHISAN116", "nome_lcx": "Vinícola Undurraga - Tarde"},
+    "excursão à estação de esqui el colorado": {"codigo_lcx": "CHISAN6706", "nome_lcx": "Andes Full Day - El Colorado"},
+    "excursão às termas valle de colina": {"codigo_lcx": "CHISAN039", "nome_lcx": "Cajón Del Maipo e Termas de Colina"},
+    "tour de neve por farellones e valle nevado": {"codigo_lcx": "CHISAN035", "nome_lcx": "Andes Panorâmico"},
+    "tour do vinho casillero del diablo na vinícola concha y toro": {"codigo_lcx": "CHISAN111", "nome_lcx": "Vinícola Concha y Toro Noturno"},
+    "visita guiada pelo centro histórico de santiago": {"codigo_lcx": "CHISAN055", "nome_lcx": "City Tour Santiago"},
+    "visita à vinícola haras de pirque": {"codigo_lcx": "CHISAN113", "nome_lcx": "Vinícola Haras de Pirque Sunset"},
+    # Concha y Toro — multiple tiers (matched by código interno)
+    "experiência centro do vinho concha y toro": {"codigo_lcx": "CHISAN109", "nome_lcx": "Centro del Vinho Concha y Toro - Manhã"},
+    "experiência marqués de casa concha": {"codigo_lcx": "CHISAN110", "nome_lcx": "Vinícola Concha y Toro Tour do Marqués - Manhã"},
     # Amor y Pastas
-    "experiencia gastronÃ³mica amor y pastas": {"codigo_lcx": "CHISAN033", "nome_lcx": "Amor e Pasta - Tradicional"},
+    "experiencia gastronómica amor y pastas": {"codigo_lcx": "CHISAN033", "nome_lcx": "Amor e Pasta - Tradicional"},
     # Atacama (15)
-    "excursÃ£o ao vale do arco-Ã­ris": {"codigo_lcx": "CHIATA020", "nome_lcx": "Vale do Arco-Ãris"},
-    "excursÃ£o ao valle de la luna": {"codigo_lcx": "CHIATA021", "nome_lcx": "Valle de la Luna e Pedra do Coyote"},
-    "excursÃ£o aos gÃªiseres de el tatio": {"codigo_lcx": "CHIATA007", "nome_lcx": "Geyser del Tatio"},
-    "excursÃ£o de 4 dias ao salar de uyuni": {"codigo_lcx": "CHIUYU128", "nome_lcx": "Uyuni Compartilhado (4D3N)"},
-    "excursÃ£o Ã  cordilheira do sal": {"codigo_lcx": "CHIATA023", "nome_lcx": "Vallecito"},
-    "excursÃ£o Ã s lagunas escondidas de baltinache": {"codigo_lcx": "CHIATA010", "nome_lcx": "Lagunas Escondidas de Baltinache - ManhÃ£"},
-    "excursÃ£o Ã s termas de puritama": {"codigo_lcx": "CHIATA014", "nome_lcx": "Termas de Puritama - ManhÃ£"},
-    "observaÃ§Ã£o de estrelas no deserto de atacama": {"codigo_lcx": "CHIATA016", "nome_lcx": "Tour AstronÃ´mico"},
-    "passeio de balÃ£o por san pedro de atacama": {"codigo_lcx": "CHIATA017", "nome_lcx": "Tour de BalÃ£o"},
+    "excursão ao vale do arco-íris": {"codigo_lcx": "CHIATA020", "nome_lcx": "Vale do Arco-Íris"},
+    "excursão ao valle de la luna": {"codigo_lcx": "CHIATA021", "nome_lcx": "Valle de la Luna e Pedra do Coyote"},
+    "excursão aos géiseres de el tatio": {"codigo_lcx": "CHIATA007", "nome_lcx": "Geyser del Tatio"},
+    "excursão de 4 dias ao salar de uyuni": {"codigo_lcx": "CHIUYU128", "nome_lcx": "Uyuni Compartilhado (4D3N)"},
+    "excursão à cordilheira do sal": {"codigo_lcx": "CHIATA023", "nome_lcx": "Vallecito"},
+    "excursão às lagunas escondidas de baltinache": {"codigo_lcx": "CHIATA010", "nome_lcx": "Lagunas Escondidas de Baltinache - Manhã"},
+    "excursão às termas de puritama": {"codigo_lcx": "CHIATA014", "nome_lcx": "Termas de Puritama - Manhã"},
+    "observação de estrelas no deserto de atacama": {"codigo_lcx": "CHIATA016", "nome_lcx": "Tour Astronômico"},
+    "passeio de balão por san pedro de atacama": {"codigo_lcx": "CHIATA017", "nome_lcx": "Tour de Balão"},
     "rota dos salares": {"codigo_lcx": "CHIATA012", "nome_lcx": "Ruta de los Salares"},
     "sandboarding en el valle de la muerte": {"codigo_lcx": "CHIATA013", "nome_lcx": "Sandboard"},
-    "tour en bicicleta por la garganta del diablo": {"codigo_lcx": "CHIATA018", "nome_lcx": "Tour de Bike - ManhÃ£"},
-    "trekking por el volcÃ¡n cerro toco": {"codigo_lcx": "CHIATA024", "nome_lcx": "VulcÃ£o Cerro Toco"},
-    "trilha por purilibre": {"codigo_lcx": "CHIATA019", "nome_lcx": "Trekking de Purilibre - ManhÃ£"},
+    "tour en bicicleta por la garganta del diablo": {"codigo_lcx": "CHIATA018", "nome_lcx": "Tour de Bike - Manhã"},
+    "trekking por el volcán cerro toco": {"codigo_lcx": "CHIATA024", "nome_lcx": "Vulcão Cerro Toco"},
+    "trilha por purilibre": {"codigo_lcx": "CHIATA019", "nome_lcx": "Trekking de Purilibre - Manhã"},
     # Cartagena (9)
-    "excursÃ£o ao isla lizamar beach club": {"codigo_lcx": "COLCAR025", "nome_lcx": "Lizamar Beach Club"},
-    "excursÃ£o ao mangata ocean club": {"codigo_lcx": "COLCAR034", "nome_lcx": "Mangata Beach Club"},
-    "excursÃ£o ao palmarito beach": {"codigo_lcx": "COLCAR040", "nome_lcx": "Palmarito Beach â Tierra Bomba"},
-    "excursÃ£o ao vulcÃ£o el totumo": {"codigo_lcx": "COLCAR055", "nome_lcx": "VolcÃ¡n del Totumo"},
-    "excursÃ£o Ã  ilha mÃºcura": {"codigo_lcx": "COLCAR000", "nome_lcx": "3 lslas + San Bernardo"},
-    "excursÃ£o Ã s ilhas de cartagena + plÃ¢ncton luminescente": {"codigo_lcx": "COLCAR002", "nome_lcx": "5 Islas Vip + Plancton"},
+    "excursão ao isla lizamar beach club": {"codigo_lcx": "COLCAR025", "nome_lcx": "Lizamar Beach Club"},
+    "excursão ao mangata ocean club": {"codigo_lcx": "COLCAR034", "nome_lcx": "Mangata Beach Club"},
+    "excursão ao palmarito beach": {"codigo_lcx": "COLCAR040", "nome_lcx": "Palmarito Beach – Tierra Bomba"},
+    "excursão ao vulcão el totumo": {"codigo_lcx": "COLCAR055", "nome_lcx": "Volcán del Totumo"},
+    "excursão à ilha múcura": {"codigo_lcx": "COLCAR000", "nome_lcx": "3 lslas + San Bernardo"},
+    "excursão às ilhas de cartagena + plâncton luminescente": {"codigo_lcx": "COLCAR002", "nome_lcx": "5 Islas Vip + Plancton"},
     "festa noturna de barco por cartagena": {"codigo_lcx": "COLCAR036", "nome_lcx": "Noche Blanca"},
-    "tour de barco pirata pela baÃ­a de cartagena": {"codigo_lcx": "COLCAR003", "nome_lcx": "Barco Pirata"},
-    "tour de chiva rumbera por cartagena das Ã­ndias": {"codigo_lcx": "COLCAR012", "nome_lcx": "City Tour no Ãnibus Chiva - ManhÃ£"},
-    # San AndrÃ©s (8)
-    "excursÃ£o a johnny cay + aquÃ¡rio natural": {"codigo_lcx": "COLSAO080", "nome_lcx": "Passeio do Barco Johnny Cay e AquÃ¡rio Natural"},
+    "tour de barco pirata pela baía de cartagena": {"codigo_lcx": "COLCAR003", "nome_lcx": "Barco Pirata"},
+    "tour de chiva rumbera por cartagena das índias": {"codigo_lcx": "COLCAR012", "nome_lcx": "City Tour no Ônibus Chiva - Manhã"},
+    # San Andrés (8)
+    "excursão a johnny cay + aquário natural": {"codigo_lcx": "COLSAO080", "nome_lcx": "Passeio do Barco Johnny Cay e Aquário Natural"},
     "festa no bar flutuante ibiza": {"codigo_lcx": "COLSAO064", "nome_lcx": "Bar Ibiza Sai"},
-    "parasailing em san andrÃ©s": {"codigo_lcx": "COLSAO077", "nome_lcx": "Parasail - ManhÃ£"},
-    "passeio de barco semisubmarino por san andrÃ©s": {"codigo_lcx": "COLSAO081", "nome_lcx": "Semisubmarino - ManhÃ£"},
-    "seawalker em san andrÃ©s": {"codigo_lcx": "COLSAO063", "nome_lcx": "Aquanautas - ManhÃ£"},
-    "snorkel em san andrÃ©s": {"codigo_lcx": "COLSAO072", "nome_lcx": "Mergulho com Snorkel - ManhÃ£"},
-    "tour de caiaque transparente pelos manguezais de san andrÃ©s": {"codigo_lcx": "COLSAO068", "nome_lcx": "ECOFIWI Caiaque Transparente - ManhÃ£"},
+    "parasailing em san andrés": {"codigo_lcx": "COLSAO077", "nome_lcx": "Parasail - Manhã"},
+    "passeio de barco semisubmarino por san andrés": {"codigo_lcx": "COLSAO081", "nome_lcx": "Semisubmarino - Manhã"},
+    "seawalker em san andrés": {"codigo_lcx": "COLSAO063", "nome_lcx": "Aquanautas - Manhã"},
+    "snorkel em san andrés": {"codigo_lcx": "COLSAO072", "nome_lcx": "Mergulho com Snorkel - Manhã"},
+    "tour de caiaque transparente pelos manguezais de san andrés": {"codigo_lcx": "COLSAO068", "nome_lcx": "ECOFIWI Caiaque Transparente - Manhã"},
     # Lima (1)
-    "excursÃ£o a ica e huacachina + ilhas ballestas": {"codigo_lcx": "PERLIM024", "nome_lcx": "Islas Ballestas y Desierto Huacachina"},
+    "excursão a ica e huacachina + ilhas ballestas": {"codigo_lcx": "PERLIM024", "nome_lcx": "Islas Ballestas y Desierto Huacachina"},
     # Cusco (3)
-    "excursÃ£o ao vale sagrado dos incas + maras, moray e ollantaytambo": {"codigo_lcx": "PERCUS020", "nome_lcx": "Valle Sagrado + Moray e Maras"},
-    "excursÃ£o Ã  lagoa humantay": {"codigo_lcx": "PERCUS005", "nome_lcx": "Laguna Humantay"},
-    "visita guiada por cusco e suas 4 ruÃ­nas": {"codigo_lcx": "PERCUS002", "nome_lcx": "City Tour em Cusco - ManhÃ£"},
+    "excursão ao vale sagrado dos incas + maras, moray e ollantaytambo": {"codigo_lcx": "PERCUS020", "nome_lcx": "Valle Sagrado + Moray e Maras"},
+    "excursão à lagoa humantay": {"codigo_lcx": "PERCUS005", "nome_lcx": "Laguna Humantay"},
+    "visita guiada por cusco e suas 4 ruínas": {"codigo_lcx": "PERCUS002", "nome_lcx": "City Tour em Cusco - Manhã"},
 }
 
 
 _mapping_cache = {"data": None, "ts": None}
 
-def _fix_mojibake(s):
-    """Fix double-encoded UTF-8 (mojibake) in hardcoded map keys."""
-    try:
-        return s.encode('latin-1').decode('utf-8')
-    except (UnicodeDecodeError, UnicodeEncodeError):
-        return s
-
-
 def load_mapping():
-    """Load CivitatisâLCX mapping. Tries Google Sheets first, falls back to hardcoded."""
+    """Load Civitatis→LCX mapping. Tries Google Sheets first, falls back to hardcoded."""
     now = datetime.now()
     if _mapping_cache["data"] and _mapping_cache["ts"] and (now - _mapping_cache["ts"]).seconds < 300:
         return _mapping_cache["data"]
 
-    # Fix mojibake in hardcoded keys (double-encoded UTF-8 from GitHub editor)
-    mapping = {}
-    for k, v in HARDCODED_MAPPING.items():
-        clean_key = _fix_mojibake(k)
-        mapping[clean_key] = v
+    mapping = dict(HARDCODED_MAPPING)
 
     # Try to overlay with live Google Sheets data
     try:
@@ -195,7 +190,7 @@ def load_mapping():
                     nome_cvt = row[2].strip()
                     codigo_lcx = row[3].strip()
                     nome_lcx = row[4].strip() if len(row) > 4 else ""
-                    if nome_cvt and codigo_lcx and not codigo_lcx.startswith("â¸"):
+                    if nome_cvt and codigo_lcx and not codigo_lcx.startswith("▸"):
                         # Support multiple names per cell separated by "/"
                         names = [n.strip() for n in nome_cvt.split("/")]
                         for name in names:
@@ -221,7 +216,7 @@ def find_lcx_tour(atividade, codigo_interno):
         return None, None
 
     key = unicodedata.normalize("NFC", atividade.strip().lower())
-    # Remove language/tier suffix: " - Tour em portuguÃªs", " - Tour com retirada + ..."
+    # Remove language/tier suffix: " - Tour em português", " - Tour com retirada + ..."
     key_clean = re.sub(r'\s*-\s*tour\s+.*$', '', key, flags=re.IGNORECASE).strip()
 
     # 1. Exact match on clean activity name
@@ -229,7 +224,7 @@ def find_lcx_tour(atividade, codigo_interno):
         m = mapping[key_clean]
         return m["codigo_lcx"], m["nome_lcx"]
 
-    # 2. Match via cÃ³digo interno (e.g. "Valle Nevado Ski (Full) Day")
+    # 2. Match via código interno (e.g. "Valle Nevado Ski (Full) Day")
     if codigo_interno:
         cod_lower = codigo_interno.strip().lower()
         for k, v in mapping.items():
@@ -257,9 +252,9 @@ def find_lcx_tour(atividade, codigo_interno):
     return None, None
 
 
-# âââââââââââââââââââââââââââââââââââââââââââââââââââââââ
-# EMAIL PARSER â CIVITATIS NEW BOOKING
-# âââââââââââââââââââââââââââââââââââââââââââââââââââââââ
+# ═══════════════════════════════════════════════════════
+# EMAIL PARSER — CIVITATIS NEW BOOKING
+# ═══════════════════════════════════════════════════════
 def parse_civitatis_email(msg):
     """Parse a Civitatis new booking email into structured data."""
     subject = ""
@@ -341,7 +336,7 @@ def parse_text_body(text, booking_number, subject):
         "subject": subject,
     }
 
-    # Clean the text first â Civitatis HTML produces massive whitespace
+    # Clean the text first — Civitatis HTML produces massive whitespace
     text = _clean_text(text)
     data["raw_text"] = text[:3000]
 
@@ -350,7 +345,7 @@ def parse_text_body(text, booking_number, subject):
         if "reserva foi cancelada" in text.lower() or "cancelamento" in text.lower():
             data["type"] = "CANCELAMENTO"
             return data
-        if "modificaÃ§Ã£o" in text.lower() or "modificada" in text.lower():
+        if "modificação" in text.lower() or "modificada" in text.lower():
             data["type"] = "MODIFICACAO"
             return data
 
@@ -365,14 +360,14 @@ def parse_text_body(text, booking_number, subject):
     data["atividade"] = extract("Atividade")
     data["cidade"] = extract("Cidade")
     data["idioma"] = extract("Idioma")
-    data["codigo_interno"] = extract("CÃ³digo interno")
+    data["codigo_interno"] = extract("Código interno")
     data["data_tour"] = extract("Data")
     data["hora"] = extract("Hora")
     data["ponto_retirada"] = extract("Ponto de retirada")
 
-    # Booking number from "NÃºmero da reserva:" if not already set
+    # Booking number from "Número da reserva:" if not already set
     if not booking_number:
-        nr = extract("NÃºmero da reserva")
+        nr = extract("Número da reserva")
         if nr:
             data["booking_number"] = nr.strip()
 
@@ -382,7 +377,7 @@ def parse_text_body(text, booking_number, subject):
         data["nome_completo"] = nome_completo
 
     # Parse pessoas (people breakdown)
-    # Formats: "2 adultos x R$290", "2 Por pessoa x US$126", "1 adulto + 1 crianÃ§a"
+    # Formats: "2 adultos x R$290", "2 Por pessoa x US$126", "1 adulto + 1 criança"
     pessoas_section = re.search(r'Pessoas\s*\n(.+?)(?:Dados|Preço|$)', text, re.DOTALL | re.IGNORECASE)
     if pessoas_section:
         pessoas_text = pessoas_section.group(1)
@@ -399,7 +394,7 @@ def parse_text_body(text, booking_number, subject):
         data["num_seniors"] = int(seniors.group(1)) if seniors else 0
         data["num_total"] = data["num_adults"] + data["num_children"] + data["num_seniors"]
 
-    # Prices â tolerate newlines between label and R$
+    # Prices — tolerate newlines between label and R$
     preco_venda = re.search(r'Preço de venda\s*\n?\s*R\$\s*\n?\s*([\d.,]+)', text)
     preco_liquido = re.search(r'Preço líquido\s*\n?\s*R\$\s*\n?\s*([\d.,]+)', text)
     # Also try "Preço total" as fallback (some email formats)
@@ -409,7 +404,7 @@ def parse_text_body(text, booking_number, subject):
         if not match:
             return ""
         val = match.group(1).strip()
-        # Handle BR format: "1.234,56" â "1234.56", "1.260" â "1260", "502,50" â "502.50"
+        # Handle BR format: "1.234,56" → "1234.56", "1.260" → "1260", "502,50" → "502.50"
         if "," in val:
             # Has comma = decimal separator. Dots are thousands.
             val = val.replace(".", "").replace(",", ".")
@@ -418,7 +413,7 @@ def parse_text_body(text, booking_number, subject):
             # "1.260" = 1260 (thousands), "502.50" = 502.50 (decimal)
             parts = val.split(".")
             if len(parts) == 2 and len(parts[1]) == 3:
-                # "1.260" â thousands separator
+                # "1.260" → thousands separator
                 val = val.replace(".", "")
             # else keep as-is (already decimal format like "502.50")
         return val
@@ -433,11 +428,11 @@ def parse_text_body(text, booking_number, subject):
     data["nome"] = nome.group(1).strip() if nome else ""
     data["sobrenomes"] = sobrenomes.group(1).strip() if sobrenomes else ""
 
-    # ComentÃ¡rios
+    # Comentários
     comentario = re.search(r'Coment[áa]rios?:\s*\n?\s*(.+?)(?:\n\n|$)', text, re.DOTALL | re.IGNORECASE)
     data["comentario"] = comentario.group(1).strip() if comentario else ""
 
-    # Parse passengers â "Dados passageiro N:" blocks
+    # Parse passengers — "Dados passageiro N:" blocks
     data["passageiros"] = []
     passenger_blocks = re.split(r'Dados\s+passageiro\s*\d+:', text, flags=re.IGNORECASE)
     for block in passenger_blocks[1:]:
@@ -454,7 +449,7 @@ def parse_text_body(text, booking_number, subject):
         p["age"] = int(idade.group(1)) if idade else None
         p["whatsapp"] = pext("Telefone")
         p["hotel"] = pext("Lugar de retirada")
-        p["dietaryRestriction"] = pext(r"Restri[Ã§c][Ãµo]es?\s+alimentar\w*")
+        p["dietaryRestriction"] = pext(r"Restri[çc][õo]es?\s+alimentar\w*")
 
         if p["name"]:
             data["passageiros"].append(p)
@@ -485,7 +480,7 @@ def parse_text_body(text, booking_number, subject):
 def parse_date_pt(date_str):
     """Parse Portuguese date like 'Domingo, 7 de fevereiro de 2027' to ISO."""
     months = {
-        "janeiro": 1, "fevereiro": 2, "marÃ§o": 3, "abril": 4,
+        "janeiro": 1, "fevereiro": 2, "março": 3, "abril": 4,
         "maio": 5, "junho": 6, "julho": 7, "agosto": 8,
         "setembro": 9, "outubro": 10, "novembro": 11, "dezembro": 12
     }
@@ -500,9 +495,9 @@ def parse_date_pt(date_str):
     return ""
 
 
-# âââââââââââââââââââââââââââââââââââââââââââââââââââââââ
+# ═══════════════════════════════════════════════════════
 # LCX INTEGRATION
-# âââââââââââââââââââââââââââââââââââââââââââââââââââââââ
+# ═══════════════════════════════════════════════════════
 class LCXClient:
     def __init__(self):
         self.session = requests.Session()
@@ -589,7 +584,7 @@ class LCXClient:
 
 
     def update_sale_status(self, sale_id, status="CONFIRMED"):
-        """Update sale status (PENDING â CONFIRMED)."""
+        """Update sale status (PENDING → CONFIRMED)."""
         if not self.logged_in:
             if not self.login():
                 return {"success": False, "error": "Login failed"}
@@ -616,7 +611,7 @@ class LCXClient:
         FAIL-CLOSED: if we can't check, return True (assume exists) to prevent duplicates."""
         if not self.logged_in:
             if not self.login():
-                print(f"[LCX-DEDUP] Cannot check booking #{booking_number} â login failed, BLOCKING launch")
+                print(f"[LCX-DEDUP] Cannot check booking #{booking_number} — login failed, BLOCKING launch")
                 return True  # FAIL-CLOSED: don't create if we can't verify
         try:
             r = self.session.get(
@@ -630,14 +625,14 @@ class LCXClient:
                 has_booking = f"*cvt* #{booking_number}" in r.text or f"*cvt*#{booking_number}" in r.text
                 exists = has_sale and has_booking
                 if exists:
-                    print(f"[LCX-DEDUP] Booking #{booking_number} ALREADY EXISTS in LCX â skipping")
+                    print(f"[LCX-DEDUP] Booking #{booking_number} ALREADY EXISTS in LCX — skipping")
                 else:
-                    print(f"[LCX-DEDUP] Booking #{booking_number} NOT found in LCX â will create")
+                    print(f"[LCX-DEDUP] Booking #{booking_number} NOT found in LCX — will create")
                 return exists
-            print(f"[LCX-DEDUP] HTTP {r.status_code} checking #{booking_number} â BLOCKING launch")
+            print(f"[LCX-DEDUP] HTTP {r.status_code} checking #{booking_number} — BLOCKING launch")
             return True  # FAIL-CLOSED
         except Exception as e:
-            print(f"[LCX-DEDUP] Error checking booking #{booking_number}: {e} â BLOCKING launch")
+            print(f"[LCX-DEDUP] Error checking booking #{booking_number}: {e} — BLOCKING launch")
             return True  # FAIL-CLOSED: don't create if we can't verify
 
 
@@ -698,7 +693,7 @@ def build_lcx_sale(parsed_email):
     tour_date = data.get("data_iso", "")
     num_people = data.get("num_total", 1) or 1
 
-    # Use preÃ§o LÃQUIDO (net price), not preÃ§o de venda
+    # Use preço LÍQUIDO (net price), not preço de venda
     preco = 0
     try:
         preco = float(data.get("preco_liquido", "0") or "0")
@@ -721,16 +716,16 @@ def build_lcx_sale(parsed_email):
     notes_parts = [
         f"Reserva Civitatis #{data.get('booking_number', '')}",
         f"{codigo_lcx or ''}",
-        f"CÃ³digo interno: {data.get('codigo_interno', '')}",
-        f"PreÃ§o venda: R$ {data.get('preco_venda', '0')}",
-        f"PreÃ§o lÃ­quido: R$ {data.get('preco_liquido', '0')}",
-        f"HorÃ¡rio: {data.get('hora', '')}",
+        f"Código interno: {data.get('codigo_interno', '')}",
+        f"Preço venda: R$ {data.get('preco_venda', '0')}",
+        f"Preço líquido: R$ {data.get('preco_liquido', '0')}",
+        f"Horário: {data.get('hora', '')}",
     ]
     if data.get("comentario"):
-        notes_parts.append(f"ComentÃ¡rio cliente: {data['comentario']}")
+        notes_parts.append(f"Comentário cliente: {data['comentario']}")
     notes = " | ".join([p for p in notes_parts if p])
 
-    # Build items array â 1 item per priceTier, price = total for that tier
+    # Build items array — 1 item per priceTier, price = total for that tier
     items = []
     num_adults = data.get("num_adults", 0) or num_people
     num_children = data.get("num_children", 0)
@@ -775,7 +770,7 @@ def build_lcx_sale(parsed_email):
             "isGift": False,
         })
 
-    # Build payment â DINHEIRO (CASH) + PAGO (paid)
+    # Build payment — DINHEIRO (CASH) + PAGO (paid)
     payments = [{
         "method": "CASH",
         "amount": round(preco, 2),
@@ -787,7 +782,7 @@ def build_lcx_sale(parsed_email):
     if data.get("passageiros"):
         for p in data["passageiros"]:
             diet_labels = []
-            if p.get("dietaryRestriction") and p["dietaryRestriction"].lower() not in ("nao", "nÃ£o", "no", "none", ""):
+            if p.get("dietaryRestriction") and p["dietaryRestriction"].lower() not in ("nao", "não", "no", "none", ""):
                 diet_labels.append(p["dietaryRestriction"])
             participants.append({
                 "name": p.get("name", "Participante"),
@@ -838,9 +833,9 @@ def build_lcx_sale(parsed_email):
     return sale, codigo_lcx
 
 
-# âââââââââââââââââââââââââââââââââââââââââââââââââââââââ
-# GMAIL IMAP â FETCH NEW BOOKING EMAILS
-# âââââââââââââââââââââââââââââââââââââââââââââââââââââââ
+# ═══════════════════════════════════════════════════════
+# GMAIL IMAP — FETCH NEW BOOKING EMAILS
+# ═══════════════════════════════════════════════════════
 def fetch_new_booking_emails(max_results=10, since_hours=24):
     """Fetch recent Civitatis new booking emails via IMAP."""
     if not GMAIL_EMAIL or not GMAIL_APP_PASSWORD:
@@ -890,9 +885,9 @@ def fetch_new_booking_emails(max_results=10, since_hours=24):
         return []
 
 
-# âââââââââââââââââââââââââââââââââââââââââââââââââââââââ
+# ═══════════════════════════════════════════════════════
 # PERSISTENT DEDUPLICATION VIA GOOGLE SHEETS
-# âââââââââââââââââââââââââââââââââââââââââââââââââââââââ
+# ═══════════════════════════════════════════════════════
 # Uses a "Launch Log" worksheet in the same spreadsheet to persist
 # launched booking numbers. Survives Railway deploys (no more duplicates).
 
@@ -920,7 +915,7 @@ def _get_or_create_log_sheet(gc):
         ws = sh.worksheet("Launch Log")
     except gspread.WorksheetNotFound:
         ws = sh.add_worksheet(title="Launch Log", rows=500, cols=6)
-        ws.update("A1:F1", [["Booking #", "Timestamp", "CÃ³digo LCX", "Status", "Sale ID", "Atividade"]])
+        ws.update("A1:F1", [["Booking #", "Timestamp", "Código LCX", "Status", "Sale ID", "Atividade"]])
         print("[SHEETS] Created 'Launch Log' worksheet")
     return ws
 
@@ -935,7 +930,7 @@ def load_launched_bookings():
     try:
         gc = _get_sheets_client()
         if not gc:
-            print("[SHEETS] No client â using in-memory cache only")
+            print("[SHEETS] No client — using in-memory cache only")
             return _launched_bookings_cache["data"]
         ws = _get_or_create_log_sheet(gc)
         all_rows = ws.get_all_values()
@@ -965,7 +960,7 @@ def record_launch(booking_number, codigo_lcx, status, sale_id, atividade):
     try:
         gc = _get_sheets_client()
         if not gc:
-            print(f"[SHEETS] No client â cached only: #{booking_number} â {status}")
+            print(f"[SHEETS] No client — cached only: #{booking_number} → {status}")
             return
         ws = _get_or_create_log_sheet(gc)
         ws.append_row([
@@ -976,14 +971,14 @@ def record_launch(booking_number, codigo_lcx, status, sale_id, atividade):
             sale_id or "",
             atividade or "",
         ])
-        print(f"[SHEETS] Recorded launch: #{booking_number} â {status}")
+        print(f"[SHEETS] Recorded launch: #{booking_number} → {status}")
     except Exception as e:
         print(f"[SHEETS] Error recording launch (cached in memory): {e}")
 
 
-# âââââââââââââââââââââââââââââââââââââââââââââââââââââââ
-# ROUTES (minimal â no panel, only health check + status)
-# âââââââââââââââââââââââââââââââââââââââââââââââââââââââ
+# ═══════════════════════════════════════════════════════
+# ROUTES (minimal — no panel, only health check + status)
+# ═══════════════════════════════════════════════════════
 
 def record_to_tracker(em, codigo_lcx, sale_id):
     """Write launched sale to Lucas's tracker Google Sheet in real-time."""
@@ -1021,9 +1016,130 @@ def record_to_tracker(em, codigo_lcx, sale_id):
         print(f"[TRACKER] Error writing to tracker: {e}")
 
 
+def record_alert(alert_type, message, details=""):
+    """Write an alert to the 'Alertas' tab of the tracker sheet."""
+    try:
+        gc = _get_sheets_client()
+        if not gc:
+            print(f"[ALERT] No Sheets client — alert lost: {message}")
+            return
+        sh = gc.open_by_key(TRACKER_SHEET_ID)
+        try:
+            ws = sh.worksheet("Alertas")
+        except Exception:
+            ws = sh.add_worksheet(title="Alertas", rows=500, cols=5)
+            ws.update("A1:E1", [["Data/Hora", "Tipo", "Mensagem", "Detalhes", "Resolvido?"]])
+            ws.format("A1:E1", {"textFormat": {"bold": True}})
+        ws.append_row([
+            datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            alert_type,
+            message,
+            details[:500],
+            "NAO"
+        ])
+        print(f"[ALERT] Recorded: {alert_type} — {message}")
+    except Exception as e:
+        print(f"[ALERT] Error writing alert: {e}")
+
+
+def write_daily_summary():
+    """Write a daily summary row to the 'Resumo Diario' tab of the tracker sheet."""
+    try:
+        gc = _get_sheets_client()
+        if not gc:
+            print("[SUMMARY] No Sheets client")
+            return
+        sh = gc.open_by_key(TRACKER_SHEET_ID)
+
+        # Read today's launches from tracker tab
+        try:
+            tracker_ws = sh.worksheet("Lançamentos CVT")
+            all_rows = tracker_ws.get_all_values()
+        except Exception:
+            all_rows = []
+
+        today_str = datetime.now().strftime("%Y-%m-%d")
+        today_launches = []
+        total_liquido = 0
+        total_venda = 0
+        for row in all_rows[1:]:  # skip header
+            if len(row) >= 13 and row[1].startswith(today_str):
+                today_launches.append(row)
+                try:
+                    total_venda += float(row[8]) if row[8] else 0
+                except (ValueError, IndexError):
+                    pass
+                try:
+                    total_liquido += float(row[9]) if row[9] else 0
+                except (ValueError, IndexError):
+                    pass
+
+        # Read today's alerts
+        try:
+            alerts_ws = sh.worksheet("Alertas")
+            alert_rows = alerts_ws.get_all_values()
+            today_alerts = [r for r in alert_rows[1:] if len(r) >= 2 and r[0].startswith(today_str)]
+        except Exception:
+            today_alerts = []
+
+        # Write to Resumo Diario tab
+        try:
+            summary_ws = sh.worksheet("Resumo Diario")
+        except Exception:
+            summary_ws = sh.add_worksheet(title="Resumo Diario", rows=500, cols=8)
+            summary_ws.update("A1:H1", [["Data", "Total Lancamentos", "Total Venda (R$)", "Total Liquido (R$)", "Total Pax", "Erros/Alertas", "Destinos", "Detalhes"]])
+            summary_ws.format("A1:H1", {"textFormat": {"bold": True}})
+
+        # Calculate total pax
+        total_pax = 0
+        destinos = set()
+        for row in today_launches:
+            try:
+                pax_str = row[7] if len(row) > 7 else "0"
+                # Parse "2A+1C" format
+                adults = int(re.search(r'(\d+)A', pax_str).group(1)) if 'A' in pax_str else 0
+                children = int(re.search(r'(\d+)C', pax_str).group(1)) if 'C' in pax_str else 0
+                total_pax += adults + children
+            except Exception:
+                pass
+            if len(row) > 4 and row[4]:
+                destinos.add(row[4])
+
+        summary_ws.append_row([
+            today_str,
+            len(today_launches),
+            f"{total_venda:.2f}",
+            f"{total_liquido:.2f}",
+            total_pax,
+            len(today_alerts),
+            ", ".join(sorted(destinos)) or "—",
+            f"{len(today_launches)} vendas lancadas, {len(today_alerts)} alertas"
+        ])
+        print(f"[SUMMARY] Daily summary written: {len(today_launches)} launches, R$ {total_liquido:.2f} liquido, {len(today_alerts)} alerts")
+    except Exception as e:
+        print(f"[SUMMARY] Error writing daily summary: {e}")
+
+
+def daily_summary_worker():
+    """Background thread: write daily summary at DAILY_SUMMARY_HOUR."""
+    last_summary_date = None
+    while True:
+        try:
+            now = datetime.now()
+            today = now.date()
+            # Check yesterday's data at DAILY_SUMMARY_HOUR (e.g. 8 AM)
+            if now.hour >= DAILY_SUMMARY_HOUR and last_summary_date != today:
+                print(f"[SUMMARY] Generating daily summary for {today}")
+                write_daily_summary()
+                last_summary_date = today
+        except Exception as e:
+            print(f"[SUMMARY WORKER] Error: {e}")
+        time.sleep(300)  # Check every 5 min
+
+
 @app.route("/")
 def index():
-    """Health check â confirms the service is running."""
+    """Health check — confirms the service is running."""
     return jsonify({
         "service": "CVT Launcher",
         "status": "running",
@@ -1032,9 +1148,9 @@ def index():
         "launched_count": len(_launched_bookings_cache["data"]),
     })
 
-# âââââââââââââââââââââââââââââââââââââââââââââââââââââââ
+# ═══════════════════════════════════════════════════════
 # AUTO-SCAN BACKGROUND WORKER
-# âââââââââââââââââââââââââââââââââââââââââââââââââââââââ
+# ═══════════════════════════════════════════════════════
 
 def auto_scan_worker():
     """Background thread: scan every AUTO_SCAN_INTERVAL seconds."""
@@ -1071,9 +1187,10 @@ def auto_scan_worker():
             # CRITICAL: ensure LCX login BEFORE processing any bookings
             if not lcx_client.logged_in:
                 if not lcx_client.login():
-                    print("[AUTO-SCAN] LCX login failed â aborting this scan to prevent duplicates")
+                    print("[AUTO-SCAN] LCX login failed — aborting this scan to prevent duplicates")
                     auto_scan_status["last_result"] = f"found={len(new_bookings)} ABORTED: LCX login failed"
                     auto_scan_status["running"] = False
+                    record_alert("LOGIN_FALHOU", "LCX login falhou — scan abortado", f"found={len(new_bookings)} bookings pendentes")
                     time.sleep(AUTO_SCAN_INTERVAL)
                     continue
 
@@ -1120,11 +1237,27 @@ def auto_scan_worker():
             auto_scan_status["running"] = False
             print(f"[AUTO-SCAN] {summary}")
 
+            # Error alerting: track consecutive scan errors
+            global _consecutive_errors
+            if errors > 0 and launched == 0:
+                _consecutive_errors += 1
+                if _consecutive_errors >= CONSECUTIVE_ERROR_THRESHOLD:
+                    error_details = f"Scan {_consecutive_errors}x consecutivo com erros. Ultimo: {summary}"
+                    record_alert("ERROS_CONSECUTIVOS", f"{_consecutive_errors} scans seguidos com erros, 0 lançamentos", error_details)
+                    _consecutive_errors = 0  # Reset after alerting
+            else:
+                _consecutive_errors = 0  # Reset on success
+
+            # Alert on LCX login failure
+            if not lcx_client.logged_in:
+                record_alert("LOGIN_FALHOU", "LCX login falhou durante auto-scan", "Verificar credenciais")
+
         except Exception as e:
             auto_scan_status["running"] = False
             auto_scan_status["last_result"] = f"ERROR: {e}"
             print(f"[AUTO-SCAN ERROR] {e}")
             traceback.print_exc()
+            record_alert("EXCEPTION", f"Auto-scan crash: {type(e).__name__}", str(e)[:500])
 
         time.sleep(AUTO_SCAN_INTERVAL)
 
@@ -1135,10 +1268,21 @@ def api_auto_scan_status():
     return jsonify(auto_scan_status)
 
 
-# Start background thread on app boot
+@app.route("/api/daily-summary", methods=["POST"])
+def api_daily_summary():
+    """Manually trigger daily summary."""
+    write_daily_summary()
+    return jsonify({"status": "ok", "message": "Daily summary written"})
+
+
+# Start background threads on app boot
 _scan_thread = threading.Thread(target=auto_scan_worker, daemon=True)
 _scan_thread.start()
 print(f"[AUTO-SCAN] Thread started. Go-live: {GO_LIVE_DATE}, interval: {AUTO_SCAN_INTERVAL}s")
+
+_summary_thread = threading.Thread(target=daily_summary_worker, daemon=True)
+_summary_thread.start()
+print(f"[SUMMARY] Daily summary thread started. Report at {DAILY_SUMMARY_HOUR}:00")
 
 
 if __name__ == "__main__":
