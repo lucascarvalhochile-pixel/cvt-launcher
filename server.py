@@ -101,6 +101,7 @@ HARDCODED_MAPPING = {
     "estação de esqui portillo e laguna del inca": {"codigo_lcx": "CHISAN067", "nome_lcx": "Portillo e Laguna del Inca"},
     "excursión a las termas de colina y el embalse el yeso": {"codigo_lcx": "CHISAN040", "nome_lcx": "Cajón Del Maipo, Embalse El Yeso e Termas de Colina"},
     "excursión al parque safari de rancagua": {"codigo_lcx": "CHISAN071", "nome_lcx": "Safári Rancagua"},
+    "excursão ao parque safári de rancagua": {"codigo_lcx": "CHISAN071", "nome_lcx": "Safári Rancagua"},
     "excursión al valle nevado al atardecer": {"codigo_lcx": "CHISAN059", "nome_lcx": "Cordilheira Sunset - Verão"},
     "excursión al viñedo alyan al atardecer": {"codigo_lcx": "CHISAN107", "nome_lcx": "Vinícola Alyan"},
     "excursão à vinícola alyan ao entardecer": {"codigo_lcx": "CHISAN107", "nome_lcx": "Vinícola Alyan"},
@@ -209,6 +210,14 @@ def load_mapping():
     return mapping
 
 
+def _strip_accents(text):
+    """Remove diacritics/accents from text for fuzzy matching.
+    e.g. 'Excursão safári' → 'Excursao safari', 'Excursión' → 'Excursion'
+    """
+    nfkd = unicodedata.normalize("NFKD", text)
+    return "".join(c for c in nfkd if not unicodedata.combining(c))
+
+
 def find_lcx_tour(atividade, codigo_interno):
     """Find LCX tour code from Civitatis activity name or internal code."""
     mapping = load_mapping()
@@ -224,24 +233,32 @@ def find_lcx_tour(atividade, codigo_interno):
         m = mapping[key_clean]
         return m["codigo_lcx"], m["nome_lcx"]
 
-    # 2. Match via código interno (e.g. "Valle Nevado Ski (Full) Day")
-    if codigo_interno:
-        cod_lower = codigo_interno.strip().lower()
-        for k, v in mapping.items():
-            if cod_lower in k or k in cod_lower:
-                return v["codigo_lcx"], v["nome_lcx"]
-
-    # 3. Partial match on activity name
+    # 1b. Exact match WITHOUT accents (handles PT↔ES: excursão↔excursión, safári↔safari)
+    key_no_accent = _strip_accents(key_clean)
     for k, v in mapping.items():
-        if key_clean in k or k in key_clean:
+        if _strip_accents(k) == key_no_accent:
             return v["codigo_lcx"], v["nome_lcx"]
 
-    # 4. Word overlap match (at least 3 significant words in common)
-    key_words = set(w for w in key_clean.split() if len(w) > 3)
+    # 2. Match via código interno (accent-insensitive)
+    if codigo_interno:
+        cod_lower = _strip_accents(codigo_interno.strip().lower())
+        for k, v in mapping.items():
+            k_na = _strip_accents(k)
+            if cod_lower in k_na or k_na in cod_lower:
+                return v["codigo_lcx"], v["nome_lcx"]
+
+    # 3. Partial match on activity name (accent-insensitive)
+    for k, v in mapping.items():
+        k_na = _strip_accents(k)
+        if key_no_accent in k_na or k_na in key_no_accent:
+            return v["codigo_lcx"], v["nome_lcx"]
+
+    # 4. Word overlap match (at least 3 significant words, accent-insensitive)
+    key_words = set(w for w in key_no_accent.split() if len(w) > 3)
     best_match = None
     best_score = 0
     for k, v in mapping.items():
-        k_words = set(w for w in k.split() if len(w) > 3)
+        k_words = set(w for w in _strip_accents(k).split() if len(w) > 3)
         overlap = len(key_words & k_words)
         if overlap > best_score and overlap >= 3:
             best_score = overlap
@@ -250,7 +267,6 @@ def find_lcx_tour(atividade, codigo_interno):
         return best_match["codigo_lcx"], best_match["nome_lcx"]
 
     return None, None
-
 
 # ═══════════════════════════════════════════════════════
 # EMAIL PARSER — CIVITATIS NEW BOOKING
