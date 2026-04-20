@@ -102,6 +102,8 @@ HARDCODED_MAPPING = {
     "excursión a las termas de colina y el embalse el yeso": {"codigo_lcx": "CHISAN040", "nome_lcx": "Cajón Del Maipo, Embalse El Yeso e Termas de Colina"},
     "excursión al parque safari de rancagua": {"codigo_lcx": "CHISAN071", "nome_lcx": "Safári Rancagua"},
     "excursão ao parque safári de rancagua": {"codigo_lcx": "CHISAN071", "nome_lcx": "Safári Rancagua"},
+    "trilha pela montanha arco-íris": {"codigo_lcx": "CHIATA020", "nome_lcx": "Vale do Arco-Íris"},
+    "trilha pelo vulcão cerro toco": {"codigo_lcx": "CHIATA024", "nome_lcx": "Vulcão Cerro Toco"},
     "excursión al valle nevado al atardecer": {"codigo_lcx": "CHISAN059", "nome_lcx": "Cordilheira Sunset - Verão"},
     "excursión al viñedo alyan al atardecer": {"codigo_lcx": "CHISAN107", "nome_lcx": "Vinícola Alyan"},
     "excursão à vinícola alyan ao entardecer": {"codigo_lcx": "CHISAN107", "nome_lcx": "Vinícola Alyan"},
