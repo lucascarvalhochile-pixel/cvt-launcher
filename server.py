@@ -994,9 +994,9 @@ def record_to_tracker(em, codigo_lcx, sale_id):
             return
         sh = gc.open_by_key(TRACKER_SHEET_ID)
         try:
-            ws = sh.worksheet("Lancamentos CVT")
+            ws = sh.worksheet("Lançamentos CVT")
         except Exception:
-            ws = sh.add_worksheet(title="Lancamentos CVT", rows=500, cols=13)
+            ws = sh.add_worksheet(title="Lançamentos CVT", rows=500, cols=13)
             ws.update("A1:M1", [["Booking #", "Email Recebido", "Cliente (Dono Reserva)", "Passeio", "Cidade", "Data Tour", "Hora", "Pax", "Preco Venda (R$)", "Preco Liquido (R$)", "Codigo LCX", "Sale ID", "Status"]])
             ws.format("A1:M1", {"textFormat": {"bold": True}})
         bn = em.get("booking_number", "")
