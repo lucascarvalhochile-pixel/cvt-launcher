@@ -382,13 +382,13 @@ def parse_text_body(text, booking_number, subject):
 
     # Parse pessoas (people breakdown)
     # Formats: "2 adultos x R$290", "2 Por pessoa x US$126", "1 adulto + 1 crianÃ§a"
-    pessoas_section = re.search(r'Pessoas\s*\n(.+?)(?:Dados|PreÃ§o|$)', text, re.DOTALL | re.IGNORECASE)
+    pessoas_section = re.search(r'Pessoas\s*\n(.+?)(?:Dados|Preço|$)', text, re.DOTALL | re.IGNORECASE)
     if pessoas_section:
         pessoas_text = pessoas_section.group(1)
         data["pessoas_raw"] = pessoas_text.strip()
 
         adults = re.search(r'(\d+)\s*adult', pessoas_text, re.IGNORECASE)
-        children = re.search(r'(\d+)\s*(?:crian|niÃ±|child)', pessoas_text, re.IGNORECASE)
+        children = re.search(r'(\d+)\s*(?:crian|niñ|child)', pessoas_text, re.IGNORECASE)
         seniors = re.search(r'(\d+)\s*(?:senior|idoso)', pessoas_text, re.IGNORECASE)
         # "N Por pessoa" = all adults (generic per-person pricing)
         por_pessoa = re.search(r'(\d+)\s*[Pp]or pessoa', pessoas_text)
@@ -399,10 +399,10 @@ def parse_text_body(text, booking_number, subject):
         data["num_total"] = data["num_adults"] + data["num_children"] + data["num_seniors"]
 
     # Prices â tolerate newlines between label and R$
-    preco_venda = re.search(r'PreÃ§o de venda\s*\n?\s*R\$\s*\n?\s*([\d.,]+)', text)
-    preco_liquido = re.search(r'PreÃ§o lÃ­quido\s*\n?\s*R\$\s*\n?\s*([\d.,]+)', text)
-    # Also try "PreÃ§o total" as fallback (some email formats)
-    preco_total = re.search(r'PreÃ§o total\s*\n?\s*R\$\s*\n?\s*([\d.,]+)', text)
+    preco_venda = re.search(r'Preço de venda\s*\n?\s*R\$\s*\n?\s*([\d.,]+)', text)
+    preco_liquido = re.search(r'Preço líquido\s*\n?\s*R\$\s*\n?\s*([\d.,]+)', text)
+    # Also try "Preço total" as fallback (some email formats)
+    preco_total = re.search(r'Preço total\s*\n?\s*R\$\s*\n?\s*([\d.,]+)', text)
 
     def parse_brl(match):
         if not match:
@@ -433,7 +433,7 @@ def parse_text_body(text, booking_number, subject):
     data["sobrenomes"] = sobrenomes.group(1).strip() if sobrenomes else ""
 
     # ComentÃ¡rios
-    comentario = re.search(r'Coment[Ã¡a]rios?:\s*\n?\s*(.+?)(?:\n\n|$)', text, re.DOTALL | re.IGNORECASE)
+    comentario = re.search(r'Coment[áa]rios?:\s*\n?\s*(.+?)(?:\n\n|$)', text, re.DOTALL | re.IGNORECASE)
     data["comentario"] = comentario.group(1).strip() if comentario else ""
 
     # Parse passengers â "Dados passageiro N:" blocks
