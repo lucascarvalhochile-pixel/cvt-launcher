@@ -157,13 +157,25 @@ HARDCODED_MAPPING = {
 
 _mapping_cache = {"data": None, "ts": None}
 
+def _fix_mojibake(s):
+    """Fix double-encoded UTF-8 (mojibake) in hardcoded map keys."""
+    try:
+        return s.encode('latin-1').decode('utf-8')
+    except (UnicodeDecodeError, UnicodeEncodeError):
+        return s
+
+
 def load_mapping():
     """Load CivitatisâLCX mapping. Tries Google Sheets first, falls back to hardcoded."""
     now = datetime.now()
     if _mapping_cache["data"] and _mapping_cache["ts"] and (now - _mapping_cache["ts"]).seconds < 300:
         return _mapping_cache["data"]
 
-    mapping = dict(HARDCODED_MAPPING)  # Start with hardcoded as base
+    # Fix mojibake in hardcoded keys (double-encoded UTF-8 from GitHub editor)
+    mapping = {}
+    for k, v in HARDCODED_MAPPING.items():
+        clean_key = _fix_mojibake(k)
+        mapping[clean_key] = v
 
     # Try to overlay with live Google Sheets data
     try:
