@@ -937,8 +937,13 @@ def load_launched_bookings():
             print("[SHEETS] No client â using in-memory cache only")
             return _launched_bookings_cache["data"]
         ws = _get_or_create_log_sheet(gc)
-        rows = ws.col_values(1)  # Column A = booking numbers
-        bookings = set(r.strip() for r in rows[1:] if r.strip())  # Skip header
+        all_rows = ws.get_all_values()
+        # Only dedup OK launches — ERRO should be retried
+        bookings = set()
+        for row in all_rows[1:]:
+            if len(row) >= 4 and row[0].strip():
+                if row[3].strip().upper() != "ERRO":
+                    bookings.add(row[0].strip())
         # Merge with in-memory cache (keeps bookings from failed writes)
         bookings = bookings | _launched_bookings_cache["data"]
         _launched_bookings_cache["data"] = bookings
@@ -952,8 +957,9 @@ def load_launched_bookings():
 
 def record_launch(booking_number, codigo_lcx, status, sale_id, atividade):
     """Record a launch in the Google Sheets log (persistent)."""
-    # ALWAYS update in-memory cache first (survives Sheets errors)
-    _launched_bookings_cache["data"].add(booking_number)
+    # Only cache successful launches — ERRO should be retried
+    if status == "OK":
+        _launched_bookings_cache["data"].add(booking_number)
 
     try:
         gc = _get_sheets_client()
