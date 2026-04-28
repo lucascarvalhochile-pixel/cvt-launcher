@@ -7,9 +7,12 @@ import os
 import re
 import json
 import imaplib
+import smtplib
 import email as email_lib
 from email.header import decode_header
 from email.utils import parsedate_to_datetime
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText as MIMETextPart
 from datetime import datetime, timedelta
 import traceback
 import unicodedata
@@ -1060,6 +1063,67 @@ def record_alert(alert_type, message, details=""):
         print(f"[ALERT] Error writing alert: {e}")
 
 
+def send_urgent_booking_email(em, sale_id, codigo_lcx):
+    """Send urgent email when a booking has less than 24h until tour date."""
+    try:
+        booking_num = em.get("booking_number", "")
+        atividade = em.get("atividade", "N/A")
+        cidade = em.get("cidade", "N/A")
+        data_tour = em.get("data_tour", em.get("data_iso", "N/A"))
+        hora = em.get("hora", "N/A")
+        num_total = em.get("num_total", em.get("num_adults", "?"))
+        num_adults = em.get("num_adults", "?")
+        num_children = em.get("num_children", 0)
+        preco_liquido = em.get("preco_liquido", "N/A")
+        preco_venda = em.get("preco_venda", "N/A")
+        ponto_retirada = em.get("ponto_retirada", "N/A")
+        comentario = em.get("comentario", "")
+
+        nome = em.get("nome", "")
+        sobrenomes = em.get("sobrenomes", "")
+        nome_completo = em.get("nome_completo", f"{nome} {sobrenomes}".strip() or "N/A")
+
+        lcx_link = f"https://app.lucascarvalhoturismo.com.br/dashboard/vendas/{sale_id}" if sale_id else "N/A"
+
+        subject = f"URGÊNCIA LC CIVITATIS — #{booking_num} — {atividade} — {data_tour} {hora}"
+
+        lines = [
+            "!!! RESERVA COM MENOS DE 24H PARA EXECUCAO !!!",
+            "",
+            f"Booking:     #{booking_num}",
+            f"Tour:        {atividade} ({codigo_lcx})",
+            f"Cidade:      {cidade}",
+            f"Data/Hora:   {data_tour} às {hora}",
+            f"Pax:         {num_total} ({num_adults} adultos, {num_children} crianças)",
+            f"Cliente:     {nome_completo}",
+            f"Retirada:    {ponto_retirada}",
+            f"Preço venda: R$ {preco_venda}",
+            f"Preço líq.:  R$ {preco_liquido}",
+        ]
+        if comentario:
+            lines.append(f"Comentário:  {comentario}")
+        lines += [
+            "",
+            f"Ver no LCX: {lcx_link}",
+        ]
+
+        body = "\n".join(lines)
+
+        msg = MIMEMultipart()
+        msg["From"] = GMAIL_EMAIL
+        msg["To"] = "b2b@lucascarvalhoturismo.com.br"
+        msg["Subject"] = subject
+        msg.attach(MIMETextPart(body, "plain", "utf-8"))
+
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
+            server.login(GMAIL_EMAIL, GMAIL_APP_PASSWORD)
+            server.sendmail(GMAIL_EMAIL, "b2b@lucascarvalhoturismo.com.br", msg.as_string())
+
+        print(f"[URGENTE] Email enviado — Booking #{booking_num} em menos de 24h ({data_tour} {hora})")
+    except Exception as e:
+        print(f"[URGENTE] Erro ao enviar email urgente #{em.get('booking_number', '?')}: {e}")
+
+
 def write_daily_summary():
     """Write a daily summary row to the 'Resumo Diario' tab of the tracker sheet."""
     try:
@@ -1244,6 +1308,21 @@ def auto_scan_worker():
 
                 # Record in Google Sheets (survives deploys!)
                 record_launch(booking_num, codigo_lcx, status, sale_id, em.get("atividade", ""))
+
+                # URGÊNCIA: se lançou com sucesso e o tour é em menos de 24h, envia email
+                if result.get("success") and sale_id and sale_id not in ("unknown", "pending"):
+                    data_iso = em.get("data_iso", "")
+                    hora_tour = em.get("hora", "00:00")
+                    if data_iso:
+                        try:
+                            hora_clean = re.sub(r'[^\d:]', '', hora_tour)[:5] or "00:00"
+                            tour_dt = datetime.strptime(f"{data_iso} {hora_clean}", "%Y-%m-%d %H:%M")
+                            hours_until = (tour_dt - datetime.now()).total_seconds() / 3600
+                            if hours_until < 24:
+                                print(f"[URGENTE] Booking #{booking_num} em {hours_until:.1f}h — disparando email")
+                                send_urgent_booking_email(em, sale_id, codigo_lcx)
+                        except Exception as e_urg:
+                            print(f"[URGENTE] Erro ao calcular horas até o tour: {e_urg}")
 
                 if result.get("success"):
                     launched += 1
