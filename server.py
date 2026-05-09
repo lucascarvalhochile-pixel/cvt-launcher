@@ -153,7 +153,7 @@ HARDCODED_MAPPING = {
     "tour de barco pirata pela baía de cartagena": {"codigo_lcx": "COLCAR003", "nome_lcx": "Barco Pirata"},
     "tour de chiva rumbera por cartagena das índias": {"codigo_lcx": "COLCAR012", "nome_lcx": "City Tour no Ônibus Chiva - Manhã"},
     # San Andrés (8)
-    "excursão a johnny cay + aquário natural": {"codigo_lcx": "COLSAO080", "nome_lcx": "Passeio do Barco Johnny Cay e Aquário Natural"},
+    "excursão a johnny cay + aquário natural": {"codigo_lcx": "COLSAO079", "nome_lcx": "Passeio do Barco Johnny Cay e Aquário Natural"},
     "festa no bar flutuante ibiza": {"codigo_lcx": "COLSAO064", "nome_lcx": "Bar Ibiza Sai"},
     "parasailing em san andrés": {"codigo_lcx": "COLSAO077", "nome_lcx": "Parasail - Manhã"},
     "passeio de barco semisubmarino por san andrés": {"codigo_lcx": "COLSAO081", "nome_lcx": "Semisubmarino - Manhã"},
