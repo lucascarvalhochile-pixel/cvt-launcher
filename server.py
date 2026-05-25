@@ -166,6 +166,12 @@ HARDCODED_MAPPING = {
     "excursão ao vale sagrado dos incas + maras, moray e ollantaytambo": {"codigo_lcx": "PERCUS020", "nome_lcx": "Valle Sagrado + Moray e Maras"},
     "excursão à lagoa humantay": {"codigo_lcx": "PERCUS005", "nome_lcx": "Laguna Humantay"},
     "visita guiada por cusco e suas 4 ruínas": {"codigo_lcx": "PERCUS002", "nome_lcx": "City Tour em Cusco - Manhã"},
+    "montaña 7 colores con ticket": {"codigo_lcx": "PERCUS010", "nome_lcx": "Montanha 7 Cores"},
+    "montanha 7 cores com ticket": {"codigo_lcx": "PERCUS010", "nome_lcx": "Montanha 7 Cores"},
+    "montaña 7 colores": {"codigo_lcx": "PERCUS010", "nome_lcx": "Montanha 7 Cores"},
+    "montanha 7 cores": {"codigo_lcx": "PERCUS010", "nome_lcx": "Montanha 7 Cores"},
+    "excursión a la montaña 7 colores con ticket": {"codigo_lcx": "PERCUS010", "nome_lcx": "Montanha 7 Cores"},
+    "excursão à montanha 7 cores com ticket": {"codigo_lcx": "PERCUS010", "nome_lcx": "Montanha 7 Cores"},
 }
 
 
@@ -626,6 +632,26 @@ class LCXClient:
             return {"success": False, "error": r.text[:300]}
         except Exception as e:
             return {"success": False, "error": str(e)}
+
+    def find_sale_id(self, booking_number):
+        """Search LCX for a sale with *cvt* #BOOKING and return its sale_id.
+        Used after createSale when the RSC response doesn't return a clear sale_id."""
+        try:
+            r = self.session.get(
+                f"{LCX_BASE}/dashboard/vendas?search={booking_number}",
+                headers={"Accept": "text/html"},
+                timeout=15,
+            )
+            if r.status_code == 200:
+                if f"*cvt* #{booking_number}" in r.text or f"*cvt*#{booking_number}" in r.text:
+                    id_match = re.search(r'href="/dashboard/vendas/(cm[a-z0-9]+)"', r.text)
+                    if id_match:
+                        found_id = id_match.group(1)
+                        print(f"[LCX] Found sale_id {found_id} for booking #{booking_number}")
+                        return found_id
+        except Exception as e:
+            print(f"[LCX] Error finding sale_id for #{booking_number}: {e}")
+        return None
 
     def booking_exists(self, booking_number):
         """Check if a CVT booking already exists in LCX by searching for *cvt* #BOOKING.
@@ -1299,9 +1325,20 @@ def auto_scan_worker():
 
                 result = lcx_client.create_sale(sale_payload)
 
-                if result.get("success") and result.get("sale_id") and result["sale_id"] not in ("unknown", "pending"):
-                    lcx_client.update_sale_status(result["sale_id"], "CONFIRMED")
-                    record_to_tracker(em, codigo_lcx, result["sale_id"])
+                # Ensure we have a valid sale_id for status update
+                actual_sale_id = result.get("sale_id", "")
+                if result.get("success") and actual_sale_id in ("unknown", "pending", ""):
+                    # RSC response didn't return clear sale_id — search LCX for it
+                    time.sleep(2)  # Small delay to let LCX persist the sale
+                    found_id = lcx_client.find_sale_id(booking_num)
+                    if found_id:
+                        actual_sale_id = found_id
+                        result["sale_id"] = found_id
+                        print(f"[AUTO-SCAN] Recovered sale_id {found_id} for booking #{booking_num}")
+
+                if result.get("success") and actual_sale_id and actual_sale_id not in ("unknown", "pending"):
+                    lcx_client.update_sale_status(actual_sale_id, "CONFIRMED")
+                    record_to_tracker(em, codigo_lcx, actual_sale_id)
 
                 status = "OK" if result.get("success") else "ERRO"
                 sale_id = result.get("sale_id", "")
