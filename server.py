@@ -42,9 +42,9 @@ TRACKER_SHEET_ID = "1qDnTjA2vySipZy-xy-NBC-TB1Snf1TTjAakJt0_0Dzw"
 GSHEET_CREDS_JSON = os.environ.get("GSHEET_CREDS_JSON", "")
 
 # Server action IDs (reverse-engineered from LCX)
-ACTION_CREATE_SALE = "60a05c5cc48e4fb8c831d1723257595500cc043f96"
-ACTION_GET_TOURS = "4072a0461556e101a12b5cc7012b048e9e4b80c00b"
-ACTION_UPDATE_SALE_STATUS = "4047dca413f1b9ae89280f6b23b5c83ef02cb407a6"
+ACTION_CREATE_SALE = "605090536f3cf700e117afe6f1709fbe05919f3b69"
+ACTION_GET_TOURS = "40b02412b7e051c61abfe91ff93f84305c3fcc8cf8"
+ACTION_UPDATE_SALE_STATUS = "4046012ea8d3a25a90ce330d1d9cb8b6d6dbef40ac"
 ACTION_UPDATE_SALE_ITEM_STATUS = "60ce85e98e85cf9a03f5b6cf9c69a1d9146f7016fb"
 
 # Auto-scan config
@@ -616,7 +616,7 @@ class LCXClient:
             if not self.login():
                 return {"success": False, "error": "Login failed"}
         try:
-            payload = json.dumps([{"saleId": sale_id, "status": status}])
+            payload = json.dumps([sale_id, status])
             r = self.session.post(
                 f"{LCX_BASE}/dashboard/vendas/{sale_id}",
                 data=payload,
