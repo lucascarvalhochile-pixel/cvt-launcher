@@ -50,6 +50,7 @@ ACTION_UPDATE_SALE_ITEM_STATUS = "60ce85e98e85cf9a03f5b6cf9c69a1d9146f7016fb"
 # Auto-scan config
 AUTO_SCAN_INTERVAL = int(os.environ.get("AUTO_SCAN_INTERVAL", "300"))  # 5 min
 GO_LIVE_DATE = os.environ.get("GO_LIVE_DATE", "2026-04-18")  # Dedup now via LCX search (no Google Sheets needed)
+LAUNCH_CUTOFF = os.environ.get("LAUNCH_CUTOFF", "2026-05-26T17:45:00")  # Skip old emails before this deploy
 auto_scan_status = {"last_run": None, "last_result": None, "running": False}
 
 # Error alerting config
@@ -1284,6 +1285,9 @@ def auto_scan_worker():
             # SAFETY: only process emails received AFTER go-live datetime
             # This prevents old emails from being launched on first run
             emails = [e for e in emails if e.get("email_date") and e["email_date"] >= go_live]
+            # Skip emails before LAUNCH_CUTOFF (prevent relaunching old bookings after redeploy)
+            cutoff = datetime.strptime(LAUNCH_CUTOFF, "%Y-%m-%dT%H:%M:%S")
+            emails = [e for e in emails if e.get("email_date") and e["email_date"] >= cutoff]
             new_bookings = [e for e in emails if e.get("type") == "NOVA_RESERVA"]
             launched = 0
             skipped = 0
