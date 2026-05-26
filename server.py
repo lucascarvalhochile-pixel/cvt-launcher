@@ -654,34 +654,64 @@ class LCXClient:
             print(f"[LCX] Error finding sale_id for #{booking_number}: {e}")
         return None
 
-    def booking_exists(self, booking_number):
+    def booking_exists(self, booking_number, max_retries=3):
         """Check if a CVT booking already exists in LCX by searching for *cvt* #BOOKING.
-        FAIL-CLOSED: if we can't check, return True (assume exists) to prevent duplicates."""
+        Retries up to max_retries times on transient errors (timeout, HTTP 5xx).
+        FAIL-CLOSED after all retries exhausted: assumes exists to prevent duplicates."""
         if not self.logged_in:
             if not self.login():
                 print(f"[LCX-DEDUP] Cannot check booking #{booking_number} — login failed, BLOCKING launch")
                 return True  # FAIL-CLOSED: don't create if we can't verify
-        try:
-            r = self.session.get(
-                f"{LCX_BASE}/dashboard/vendas?search={booking_number}",
-                headers={"Accept": "text/html"},
-                timeout=15,
-            )
-            if r.status_code == 200:
-                # Check if any sale link appears AND the booking number is in a *cvt* tag
-                has_sale = bool(re.search(r'href="/dashboard/vendas/cm[a-z0-9]+"', r.text))
-                has_booking = f"*cvt* #{booking_number}" in r.text or f"*cvt*#{booking_number}" in r.text
-                exists = has_sale and has_booking
-                if exists:
-                    print(f"[LCX-DEDUP] Booking #{booking_number} ALREADY EXISTS in LCX — skipping")
-                else:
-                    print(f"[LCX-DEDUP] Booking #{booking_number} NOT found in LCX — will create")
-                return exists
-            print(f"[LCX-DEDUP] HTTP {r.status_code} checking #{booking_number} — BLOCKING launch")
-            return True  # FAIL-CLOSED
-        except Exception as e:
-            print(f"[LCX-DEDUP] Error checking booking #{booking_number}: {e} — BLOCKING launch")
-            return True  # FAIL-CLOSED: don't create if we can't verify
+
+        for attempt in range(1, max_retries + 1):
+            try:
+                r = self.session.get(
+                    f"{LCX_BASE}/dashboard/vendas?search={booking_number}",
+                    headers={"Accept": "text/html"},
+                    timeout=20,
+                )
+                if r.status_code == 200:
+                    # Check if any sale link appears AND the booking number is in a *cvt* tag
+                    has_sale = bool(re.search(r'href="/dashboard/vendas/cm[a-z0-9]+"', r.text))
+                    has_booking = f"*cvt* #{booking_number}" in r.text or f"*cvt*#{booking_number}" in r.text
+                    exists = has_sale and has_booking
+                    if exists:
+                        print(f"[LCX-DEDUP] Booking #{booking_number} ALREADY EXISTS in LCX — skipping")
+                    else:
+                        print(f"[LCX-DEDUP] Booking #{booking_number} NOT found in LCX — will create")
+                    return exists
+
+                # HTTP error but not server error — don't retry (e.g. 403, 404)
+                if r.status_code < 500:
+                    print(f"[LCX-DEDUP] HTTP {r.status_code} checking #{booking_number} — BLOCKING launch")
+                    return True  # FAIL-CLOSED
+
+                # Server error (5xx) — retry
+                print(f"[LCX-DEDUP] HTTP {r.status_code} checking #{booking_number} — attempt {attempt}/{max_retries}")
+
+            except requests.exceptions.Timeout:
+                print(f"[LCX-DEDUP] Timeout checking #{booking_number} — attempt {attempt}/{max_retries}")
+            except requests.exceptions.ConnectionError:
+                print(f"[LCX-DEDUP] Connection error checking #{booking_number} — attempt {attempt}/{max_retries}")
+            except Exception as e:
+                print(f"[LCX-DEDUP] Error checking #{booking_number}: {e} — attempt {attempt}/{max_retries}")
+
+            # Wait before retry (exponential backoff: 2s, 4s, 8s)
+            if attempt < max_retries:
+                wait = 2 ** attempt
+                print(f"[LCX-DEDUP] Retrying in {wait}s...")
+                time.sleep(wait)
+
+                # Re-login if session might have expired
+                if not self.logged_in or attempt >= 2:
+                    print(f"[LCX-DEDUP] Re-login before retry {attempt + 1}")
+                    self.logged_in = False
+                    if not self.login():
+                        print(f"[LCX-DEDUP] Re-login failed — BLOCKING launch for #{booking_number}")
+                        return True
+
+        print(f"[LCX-DEDUP] All {max_retries} attempts failed for #{booking_number} — BLOCKING launch (fail-closed)")
+        return True  # FAIL-CLOSED after all retries
 
 
 lcx_client = LCXClient()
