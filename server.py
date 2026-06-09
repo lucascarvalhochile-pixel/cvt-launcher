@@ -94,6 +94,61 @@ def resolve_country_city(raw_city):
 
 
 # ═══════════════════════════════════════════════════════
+# TOUR CODE → DESTINO (country + city)
+# Source of truth: the LCX tour code prefix (first 6 chars).
+# Used by validate_tour_country() to detect mismatch
+# between email destino and matched tour destino.
+# ═══════════════════════════════════════════════════════
+CODE_PREFIX_DESTINO = {
+    "CHISAN": ("Chile", "Santiago"),
+    "CHIATA": ("Chile", "Atacama"),
+    "CHIUYU": ("Chile", "Uyuni"),
+    "COLCAR": ("Colômbia", "Cartagena"),
+    "COLSAO": ("Colômbia", "San Andres"),
+    "PERLIM": ("Peru", "Lima"),
+    "PERCUS": ("Peru", "Cusco"),
+    "MEXCAN": ("México", "Cancún"),
+    "DOMPUN": ("República Dominicana", "Punta Cana"),
+    "ARGBUE": ("Argentina", "Buenos Aires"),
+    "USAMIA": ("Estados Unidos", "Miami"),
+    "USAORL": ("Estados Unidos", "Orlando"),
+}
+
+
+def tour_code_destino(codigo_lcx):
+    """Extract (country, city) from LCX tour code prefix (first 6 chars).
+    Returns (None, None) for unknown prefixes."""
+    if not codigo_lcx or len(codigo_lcx) < 6:
+        return None, None
+    prefix = codigo_lcx[:6].upper()
+    return CODE_PREFIX_DESTINO.get(prefix, (None, None))
+
+
+def _norm_text(s):
+    """Lowercase + strip accents for safe comparison."""
+    return _strip_accents((s or "").strip().lower())
+
+
+def validate_tour_country(codigo_lcx, email_country, email_city):
+    """Validate that the matched LCX tour belongs to the same country/city
+    as the email. Returns True if OK, False if mismatch detected.
+
+    Fail-open if code prefix is unknown or email destino is missing
+    (so we never block on legacy codes / parser gaps).
+    """
+    tour_country, tour_city = tour_code_destino(codigo_lcx)
+    if not tour_country:
+        return True
+    if not email_country or not email_city:
+        return True
+    if _norm_text(email_country) != _norm_text(tour_country):
+        return False
+    if _norm_text(email_city) != _norm_text(tour_city):
+        return False
+    return True
+
+
+# ═══════════════════════════════════════════════════════
 # GOOGLE SHEETS — READ MAPPING TABLE
 # ═══════════════════════════════════════════════════════
 # ═══════════════════════════════════════════════════════
@@ -745,7 +800,12 @@ def _resolve_tour_id(codigo_lcx):
 
 
 def build_lcx_sale(parsed_email):
-    """Build LCX createSale payload from parsed Civitatis email data."""
+    """Build LCX createSale payload from parsed Civitatis email data.
+
+    Returns (sale_payload, codigo_lcx). If país/cidade mismatch is detected
+    between the email destino and the matched LCX tour, returns
+    (None, codigo_lcx) so the caller can reject the sale and alert.
+    """
     data = parsed_email
     country, city = resolve_country_city(data.get("cidade", ""))
 
@@ -754,6 +814,32 @@ def build_lcx_sale(parsed_email):
         data.get("atividade", ""),
         data.get("codigo_interno", "")
     )
+
+    # ─────────────────────────────────────────────
+    # CRITICAL: country/city cross-validation
+    # If the matched tour's code prefix says it belongs to a destino
+    # different from the email destino, REJECT — don't launch garbage.
+    # Example: email Peru/Cusco "Montanha 7 Cores" but matcher returned
+    # CHIATA020 (Atacama). validate_tour_country() catches this.
+    # ─────────────────────────────────────────────
+    if codigo_lcx and not validate_tour_country(codigo_lcx, country, city):
+        tour_country, tour_city = tour_code_destino(codigo_lcx)
+        booking_num = data.get("booking_number", "")
+        atividade = data.get("atividade", "")
+        print(f"[VALIDATION] MISMATCH booking #{booking_num}: tour {codigo_lcx} "
+              f"pertence a {tour_country}/{tour_city} mas email é {country}/{city}. "
+              f"Atividade: {atividade}")
+        try:
+            record_alert(
+                "PAIS_CIDADE_MISMATCH",
+                f"Tour {codigo_lcx} não pertence ao destino do email",
+                f"Booking #{booking_num} | Email destino: {country}/{city} | "
+                f"Tour destino: {tour_country}/{tour_city} | "
+                f"Atividade: {atividade}"
+            )
+        except Exception as e:
+            print(f"[VALIDATION] Falha ao registrar alerta: {e}")
+        return None, codigo_lcx
 
     # Customer name: booking OWNER (Dados do cliente) + *cvt* + booking number
     # Priority: 1) Dados do cliente (nome + sobrenomes), 2) Passenger 1 fallback
@@ -1354,6 +1440,16 @@ def auto_scan_worker():
                 if not codigo_lcx:
                     # DON'T cache SEM_CODIGO — allow retry when mapping is added later
                     print(f"[AUTO-SCAN] Booking #{'{'}booking_num{'}'} has no tour mapping: {'{'}em.get('atividade', ''){'}'} — will retry next scan")
+                    errors += 1
+                    continue
+
+                # MISMATCH: codigo_lcx existe mas país/cidade do tour ≠ país/cidade do email.
+                # build_lcx_sale já registrou alerta. Aqui marcamos como MISMATCH (não-ERRO)
+                # pra dedup bloquear retry infinito até Lucas corrigir o mapeamento.
+                if sale_payload is None:
+                    print(f"[AUTO-SCAN] Booking #{booking_num}: REJEITADO por mismatch país/cidade (tour {codigo_lcx})")
+                    record_launch(booking_num, codigo_lcx, "MISMATCH", "", em.get("atividade", ""))
+                    _launched_bookings_cache["data"].add(booking_num)
                     errors += 1
                     continue
 
