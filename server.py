@@ -221,6 +221,7 @@ HARDCODED_MAPPING = {
     # Cusco (3)
     "excursão ao vale sagrado dos incas + maras, moray e ollantaytambo": {"codigo_lcx": "PERCUS020", "nome_lcx": "Valle Sagrado + Moray e Maras"},
     "excursão à lagoa humantay": {"codigo_lcx": "PERCUS005", "nome_lcx": "Laguna Humantay"},
+    "excursão ao lago humantay": {"codigo_lcx": "PERCUS005", "nome_lcx": "Laguna Humantay"},
     "visita guiada por cusco e suas 4 ruínas": {"codigo_lcx": "PERCUS002", "nome_lcx": "City Tour em Cusco - Manhã"},
     "montaña 7 colores con ticket": {"codigo_lcx": "PERCUS010", "nome_lcx": "Montanha 7 Cores"},
     "montanha 7 cores com ticket": {"codigo_lcx": "PERCUS010", "nome_lcx": "Montanha 7 Cores"},
