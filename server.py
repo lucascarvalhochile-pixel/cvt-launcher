@@ -48,6 +48,11 @@ CIVITATIS_USER_AGENT = os.environ.get(
     "CIVITATIS_USER_AGENT",
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 )
+# Provider hash do LC TURISMO (identifica conta na API partners da Civitatis)
+CIVITATIS_PROVIDER_HASH = os.environ.get(
+    "CIVITATIS_PROVIDER_HASH",
+    "MW9adTg3LytDc2ZXVE9MWG56QVlOQT09OjozaXFVQzJXd3NM"
+)
 
 # Server action IDs (reverse-engineered from LCX)
 ACTION_CREATE_SALE = "6024226eda08008482776caa1f0eec41c77e39fabb"
@@ -824,169 +829,121 @@ def _get_civitatis_session():
     return s
 
 
-def civitatis_find_booking_hashes(booking_number):
-    """Localiza hash1 (bookingId) e hash2 (provider hash) para um booking_number.
+def civitatis_find_booking_id_hash(booking_number, max_pages=20):
+    """Localiza idHash de um booking_number via API JSON do partners Civitatis.
 
-    Estratégia:
-      1. Procura nas últimas 30 dias da listagem 'Todas las reservas'
-      2. Para cada link que contém o booking_number no texto, extrai bookingId da query string
-      3. Faz request da página de detalhe e procura URL do voucher (/es/voucher/h1/h2/1/pdf)
-
-    Retorna (hash1, hash2) ou (None, None) se não encontrado.
+    Estratégia (API JSON, não scraping):
+      1. GET /api/providers/bookings/<PROVIDER_HASH>?lang=es&page=N
+      2. Para cada página, varre json.values procurando o booking.id == booking_number
+      3. Retorna booking.idHash quando encontrar
     """
     cache_key = str(booking_number)
     if cache_key in _civitatis_hash_cache:
         return _civitatis_hash_cache[cache_key]
 
-    if not CIVITATIS_COOKIE:
-        print("[CVT-PARTNERS] CIVITATIS_COOKIE não configurado — pulando")
-        return None, None
+    if not CIVITATIS_COOKIE or not CIVITATIS_PROVIDER_HASH:
+        print("[CVT-PARTNERS] CIVITATIS_COOKIE ou CIVITATIS_PROVIDER_HASH não configurado — pulando")
+        return None
 
     s = _get_civitatis_session()
+    target = int(str(booking_number))
+    list_url = f"{CIVITATIS_BASE}/api/providers/bookings/{CIVITATIS_PROVIDER_HASH}"
+
     try:
-        list_url = f"{CIVITATIS_BASE}/es/proveedores/v2/reservas"
-        params = {
-            "detailType": "bookings.all_reservations",
-            "filterType": "r",
-            "timePeriodType": "prev30days",
-        }
-        r = s.get(list_url, params=params, timeout=20, allow_redirects=False)
+        for page in range(1, max_pages + 1):
+            params = {"lang": "es", "page": str(page)}
+            r = s.get(list_url, params=params, timeout=20,
+                      headers={"Accept": "application/json"},
+                      allow_redirects=False)
 
-        if r.status_code in (301, 302, 303, 307, 308):
-            location = r.headers.get("Location", "")
-            if "login" in location.lower() or "auth" in location.lower():
-                print(f"[CVT-PARTNERS] Cookie expirou (redirect → {location[:60]}). Renovar CIVITATIS_COOKIE.")
-                try:
-                    record_alert("CIVITATIS_COOKIE_EXPIRED",
-                                 "Cookie do partners.civitatis.com expirou",
-                                 "Faça login novamente e atualize CIVITATIS_COOKIE no Railway")
-                except Exception:
-                    pass
-                return None, None
+            if r.status_code in (301, 302, 303, 307, 308):
+                location = r.headers.get("Location", "")
+                if "login" in location.lower() or "auth" in location.lower():
+                    print(f"[CVT-PARTNERS] Cookie expirou (redirect → {location[:60]}). Renovar CIVITATIS_COOKIE.")
+                    try:
+                        record_alert("CIVITATIS_COOKIE_EXPIRED",
+                                     "Cookie do partners.civitatis.com expirou",
+                                     "Faça login novamente e atualize CIVITATIS_COOKIE no Railway")
+                    except Exception:
+                        pass
+                    return None
 
-        if r.status_code != 200:
-            print(f"[CVT-PARTNERS] Listagem retornou {r.status_code}")
-            return None, None
+            if r.status_code != 200:
+                print(f"[CVT-PARTNERS] API bookings retornou {r.status_code} na página {page}")
+                return None
 
-        html = r.text
-        pattern = re.compile(
-            r'href="[^"]*bookingId=([A-Za-z0-9+/=]+)[^"]*"[^>]*>\s*'
-            + re.escape(str(booking_number)),
-            re.IGNORECASE
-        )
-        m = pattern.search(html)
-        if not m:
-            pattern2 = re.compile(
-                re.escape(str(booking_number))
-                + r'[\s\S]{0,500}?bookingId=([A-Za-z0-9+/=]+)'
-            )
-            m = pattern2.search(html)
-        if not m:
-            print(f"[CVT-PARTNERS] Booking #{booking_number} não encontrado na listagem (últimos 30 dias)")
-            return None, None
+            try:
+                data = r.json()
+            except Exception as e:
+                print(f"[CVT-PARTNERS] Resposta não é JSON na página {page}: {e}")
+                return None
 
-        hash1 = m.group(1)
-        print(f"[CVT-PARTNERS] Booking #{booking_number}: hash1 capturado ({len(hash1)} chars)")
+            values = data.get("values") or []
+            count = data.get("count", 0)
+            for b in values:
+                if b.get("id") == target:
+                    h = b.get("idHash")
+                    if h:
+                        _civitatis_hash_cache[cache_key] = h
+                        print(f"[CVT-PARTNERS] Booking #{booking_number} encontrado na página {page} (idHash {len(h)} chars)")
+                        return h
 
-        detail_url = f"{CIVITATIS_BASE}/es/proveedores/v2/reservas/actividad/reserva"
-        r2 = s.get(detail_url, params={"bookingId": hash1, "type": "1"}, timeout=20)
-        if r2.status_code != 200:
-            print(f"[CVT-PARTNERS] Página de detalhe retornou {r2.status_code}")
-            return hash1, None
+            # Se não há mais reservas, para
+            if not values or page * 20 >= count:
+                break
 
-        voucher_pattern = re.compile(
-            r'/es/voucher/' + re.escape(hash1) + r'/([A-Za-z0-9+/=]+)/1/pdf'
-        )
-        m2 = voucher_pattern.search(r2.text)
-        if not m2:
-            print(f"[CVT-PARTNERS] hash2 não encontrado na página de detalhe — voucher pode estar em chamada JS posterior")
-            return hash1, None
-
-        hash2 = m2.group(1)
-        print(f"[CVT-PARTNERS] Booking #{booking_number}: hash2 capturado ({len(hash2)} chars)")
-        _civitatis_hash_cache[cache_key] = (hash1, hash2)
-        return hash1, hash2
+        print(f"[CVT-PARTNERS] Booking #{booking_number} não encontrado em {max_pages} páginas (total na conta: {count})")
+        return None
 
     except Exception as e:
-        print(f"[CVT-PARTNERS] Erro ao buscar hashes do booking #{booking_number}: {e}")
-        return None, None
-
-
-def civitatis_download_voucher_pdf(hash1, hash2):
-    """Baixa o voucher PDF como bytes. Retorna bytes ou None."""
-    if not (hash1 and hash2):
-        return None
-    s = _get_civitatis_session()
-    url = f"{CIVITATIS_BASE}/es/voucher/{hash1}/{hash2}/1/pdf"
-    try:
-        r = s.get(url, timeout=30, allow_redirects=True)
-        if r.status_code == 200 and r.content[:4] == b"%PDF":
-            return r.content
-        print(f"[CVT-PARTNERS] Voucher PDF retornou {r.status_code} (size={len(r.content)})")
-        return None
-    except Exception as e:
-        print(f"[CVT-PARTNERS] Erro ao baixar voucher: {e}")
+        print(f"[CVT-PARTNERS] Erro ao buscar idHash do booking #{booking_number}: {e}")
         return None
 
 
-def civitatis_extract_phone_from_pdf(pdf_bytes):
-    """Extrai telefone do cliente do voucher PDF.
+def civitatis_get_phone_from_api(id_hash):
+    """Busca telefone do cliente via API JSON de detalhe da reserva.
 
-    Layout do voucher:
-        DATOS DEL CLIENTE / GUEST DETAILS
-        <Nome>
-        <email>
-        (+CC) NUMERO   ← telefone do cliente
-
-    Retorna string formatada estilo "+51 920589513" ou None.
+    GET /api/providers/booking/<PROVIDER_HASH>/<idHash>?lang=es
+    Retorna o valor de travellerPhone, ou None.
     """
-    if not pdf_bytes:
+    if not id_hash or not CIVITATIS_COOKIE or not CIVITATIS_PROVIDER_HASH:
         return None
+    s = _get_civitatis_session()
+    url = f"{CIVITATIS_BASE}/api/providers/booking/{CIVITATIS_PROVIDER_HASH}/{id_hash}"
     try:
-        import pdfplumber
-        from io import BytesIO
-        with pdfplumber.open(BytesIO(pdf_bytes)) as pdf:
-            text = "\n".join((page.extract_text() or "") for page in pdf.pages)
-    except ImportError:
-        print("[CVT-PARTNERS] pdfplumber não instalado — adicionar em requirements.txt")
+        r = s.get(url, params={"lang": "es"}, timeout=15,
+                  headers={"Accept": "application/json"})
+        if r.status_code != 200:
+            print(f"[CVT-PARTNERS] API booking detalhe retornou {r.status_code}")
+            return None
+        data = r.json()
+        phone = data.get("travellerPhone")
+        if phone and isinstance(phone, str):
+            phone = phone.strip()
+            if not phone.startswith("+"):
+                prefix = data.get("phonePrefix") or ""
+                if prefix and not phone.startswith(prefix):
+                    phone = f"+{prefix} {phone}" if not prefix.startswith("+") else f"{prefix} {phone}"
+                else:
+                    phone = "+" + phone.lstrip("0")
+            return phone
         return None
     except Exception as e:
-        print(f"[CVT-PARTNERS] Erro ao abrir PDF: {e}")
+        print(f"[CVT-PARTNERS] Erro ao buscar detalhe da reserva: {e}")
         return None
-
-    cliente_idx = re.search(r'DATOS\s+DEL\s+CLIENTE|GUEST\s+DETAILS', text, re.IGNORECASE)
-    if cliente_idx:
-        proveedor_idx = re.search(
-            r'DATOS\s+DEL\s+PROVEEDOR|PROVIDER\s+DETAILS|PERSONAS|PEOPLE',
-            text[cliente_idx.end():], re.IGNORECASE
-        )
-        if proveedor_idx:
-            region = text[cliente_idx.end():cliente_idx.end() + proveedor_idx.start()]
-        else:
-            region = text[cliente_idx.end():cliente_idx.end() + 500]
-    else:
-        region = text[:2000]
-
-    m = re.search(r'\(?\+(\d{1,3})\)?\s*(\d{6,15})', region)
-    if not m:
-        return None
-    return f"+{m.group(1)} {m.group(2)}"
 
 
 def civitatis_get_customer_phone(booking_number):
-    """Pipeline completo: booking_number → telefone do cliente.
+    """Pipeline completo: booking_number → telefone do cliente via API JSON.
 
-    Retorna telefone ou None. Não levanta exception.
+    Retorna telefone formatado (+CC NUMERO) ou None. Não levanta exception.
     """
     if not booking_number or not CIVITATIS_COOKIE:
         return None
-    hash1, hash2 = civitatis_find_booking_hashes(booking_number)
-    if not (hash1 and hash2):
+    id_hash = civitatis_find_booking_id_hash(booking_number)
+    if not id_hash:
         return None
-    pdf = civitatis_download_voucher_pdf(hash1, hash2)
-    if not pdf:
-        return None
-    phone = civitatis_extract_phone_from_pdf(pdf)
+    phone = civitatis_get_phone_from_api(id_hash)
     if phone:
         print(f"[CVT-PARTNERS] Telefone extraído pro booking #{booking_number}: {phone}")
     return phone
@@ -1761,16 +1718,13 @@ def test_civitatis_phone():
     booking = request.args.get("booking", "").strip()
     if not booking:
         return jsonify({"error": "missing booking query param"}), 400
-    hash1, hash2 = civitatis_find_booking_hashes(booking)
-    if not hash1:
-        return jsonify({"booking": booking, "step": "find_hash1", "result": "NOT FOUND", "has_cookie": bool(CIVITATIS_COOKIE)})
-    if not hash2:
-        return jsonify({"booking": booking, "hash1_len": len(hash1), "step": "find_hash2", "result": "NOT FOUND"})
-    pdf = civitatis_download_voucher_pdf(hash1, hash2)
-    if not pdf:
-        return jsonify({"booking": booking, "hash1_len": len(hash1), "hash2_len": len(hash2), "step": "download_pdf", "result": "FAILED"})
-    phone = civitatis_extract_phone_from_pdf(pdf)
-    return jsonify({"booking": booking, "hash1_len": len(hash1), "hash2_len": len(hash2), "pdf_size": len(pdf), "phone": phone or "NOT EXTRACTED"})
+    id_hash = civitatis_find_booking_id_hash(booking)
+    if not id_hash:
+        return jsonify({"booking": booking, "step": "find_id_hash", "result": "NOT FOUND",
+                        "has_cookie": bool(CIVITATIS_COOKIE),
+                        "has_provider_hash": bool(CIVITATIS_PROVIDER_HASH)})
+    phone = civitatis_get_phone_from_api(id_hash)
+    return jsonify({"booking": booking, "id_hash_len": len(id_hash), "phone": phone or "NOT EXTRACTED"})
 
 
 @app.route("/api/auto-scan-status")
