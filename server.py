@@ -1756,6 +1756,23 @@ def auto_scan_worker():
         time.sleep(AUTO_SCAN_INTERVAL)
 
 
+@app.route("/api/test-civitatis-phone")
+def test_civitatis_phone():
+    booking = request.args.get("booking", "").strip()
+    if not booking:
+        return jsonify({"error": "missing booking query param"}), 400
+    hash1, hash2 = civitatis_find_booking_hashes(booking)
+    if not hash1:
+        return jsonify({"booking": booking, "step": "find_hash1", "result": "NOT FOUND", "has_cookie": bool(CIVITATIS_COOKIE)})
+    if not hash2:
+        return jsonify({"booking": booking, "hash1_len": len(hash1), "step": "find_hash2", "result": "NOT FOUND"})
+    pdf = civitatis_download_voucher_pdf(hash1, hash2)
+    if not pdf:
+        return jsonify({"booking": booking, "hash1_len": len(hash1), "hash2_len": len(hash2), "step": "download_pdf", "result": "FAILED"})
+    phone = civitatis_extract_phone_from_pdf(pdf)
+    return jsonify({"booking": booking, "hash1_len": len(hash1), "hash2_len": len(hash2), "pdf_size": len(pdf), "phone": phone or "NOT EXTRACTED"})
+
+
 @app.route("/api/auto-scan-status")
 def api_auto_scan_status():
     """Check auto-scan status."""
