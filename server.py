@@ -1713,6 +1713,24 @@ def auto_scan_worker():
         time.sleep(AUTO_SCAN_INTERVAL)
 
 
+@app.route("/api/test-civitatis-debug")
+def test_civitatis_debug():
+    """Debug: chama a API JSON com 1 request e retorna detalhes."""
+    s = _get_civitatis_session()
+    url = f"{CIVITATIS_BASE}/api/providers/bookings/{CIVITATIS_PROVIDER_HASH}"
+    try:
+        r = s.get(url, params={"lang": "es", "page": "1"}, timeout=20, headers={"Accept": "application/json"}, allow_redirects=False)
+        ct = r.headers.get("content-type", "")
+        body_head = r.text[:300] if r.text else ""
+        try:
+            j = r.json()
+            return jsonify({"status": r.status_code, "ct": ct, "json_keys": list(j.keys())[:10] if isinstance(j, dict) else type(j).__name__, "count": j.get("count") if isinstance(j, dict) else None, "values_len": len(j.get("values", [])) if isinstance(j, dict) else None, "first_ids": [b.get("id") for b in (j.get("values") or [])[:5]] if isinstance(j, dict) else None})
+        except Exception as e:
+            return jsonify({"status": r.status_code, "ct": ct, "not_json": str(e), "body_head": body_head, "redirect_to": r.headers.get("Location", "")[:200], "cookie_len": len(CIVITATIS_COOKIE), "provider_hash_len": len(CIVITATIS_PROVIDER_HASH)})
+    except Exception as e:
+        return jsonify({"err": str(e)})
+
+
 @app.route("/api/test-civitatis-phone")
 def test_civitatis_phone():
     booking = request.args.get("booking", "").strip()
