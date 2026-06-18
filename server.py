@@ -41,6 +41,14 @@ GSHEET_ID = os.environ.get("GSHEET_ID", "1dgMKZ31puupdU5VbzjfAPg8O_gdZfO7DDMaoMP
 TRACKER_SHEET_ID = "1qDnTjA2vySipZy-xy-NBC-TB1Snf1TTjAakJt0_0Dzw"
 GSHEET_CREDS_JSON = os.environ.get("GSHEET_CREDS_JSON", "")
 
+# Civitatis Partners (para extrair telefone do voucher PDF)
+CIVITATIS_BASE = "https://www.civitatis.com"
+CIVITATIS_COOKIE = os.environ.get("CIVITATIS_COOKIE", "")
+CIVITATIS_USER_AGENT = os.environ.get(
+    "CIVITATIS_USER_AGENT",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+)
+
 # Server action IDs (reverse-engineered from LCX)
 ACTION_CREATE_SALE = "6024226eda08008482776caa1f0eec41c77e39fabb"
 ACTION_GET_TOURS = "404f70165733d2997d26c9cb8d91af217945a7f4ac"
@@ -772,6 +780,218 @@ class LCXClient:
 lcx_client = LCXClient()
 
 
+# ═══════════════════════════════════════════════════════
+# CIVITATIS PARTNERS — Extração de telefone do voucher PDF
+# ═══════════════════════════════════════════════════════
+# A Civitatis bloqueia o telefone do cliente até 48h antes do tour
+# na interface web. MAS o voucher PDF contém o telefone do guest
+# desde o momento da reserva. Este módulo:
+#   1. Usa a sessão logada do gerencia@ (cookie em env var)
+#   2. Localiza o hash do bookingId via listagem
+#   3. Baixa o voucher PDF
+#   4. Extrai o telefone via regex
+#
+# MVP: cookie é renovado manualmente pelo Lucas a cada ~30 dias.
+# Em caso de falha (cookie expirou), a venda sobe SEM telefone
+# e um alerta é registrado.
+
+_civitatis_session_cache = {"session": None, "ts": None}
+_civitatis_hash_cache = {}  # booking_number → (hash1, hash2)
+
+
+def _build_civitatis_session():
+    """Constrói sessão requests com cookie + headers do Civitatis Partners."""
+    s = requests.Session()
+    s.headers.update({
+        "User-Agent": CIVITATIS_USER_AGENT,
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        "Accept-Language": "es-ES,es;q=0.9,pt-BR;q=0.8,en;q=0.7",
+    })
+    if CIVITATIS_COOKIE:
+        s.headers["Cookie"] = CIVITATIS_COOKIE
+    return s
+
+
+def _get_civitatis_session():
+    """Retorna sessão cacheada (reutilizada por até 10 min)."""
+    now = datetime.now()
+    if (_civitatis_session_cache["session"] and _civitatis_session_cache["ts"]
+            and (now - _civitatis_session_cache["ts"]).seconds < 600):
+        return _civitatis_session_cache["session"]
+    s = _build_civitatis_session()
+    _civitatis_session_cache["session"] = s
+    _civitatis_session_cache["ts"] = now
+    return s
+
+
+def civitatis_find_booking_hashes(booking_number):
+    """Localiza hash1 (bookingId) e hash2 (provider hash) para um booking_number.
+
+    Estratégia:
+      1. Procura nas últimas 30 dias da listagem 'Todas las reservas'
+      2. Para cada link que contém o booking_number no texto, extrai bookingId da query string
+      3. Faz request da página de detalhe e procura URL do voucher (/es/voucher/h1/h2/1/pdf)
+
+    Retorna (hash1, hash2) ou (None, None) se não encontrado.
+    """
+    cache_key = str(booking_number)
+    if cache_key in _civitatis_hash_cache:
+        return _civitatis_hash_cache[cache_key]
+
+    if not CIVITATIS_COOKIE:
+        print("[CVT-PARTNERS] CIVITATIS_COOKIE não configurado — pulando")
+        return None, None
+
+    s = _get_civitatis_session()
+    try:
+        list_url = f"{CIVITATIS_BASE}/es/proveedores/v2/reservas"
+        params = {
+            "detailType": "bookings.all_reservations",
+            "filterType": "r",
+            "timePeriodType": "prev30days",
+        }
+        r = s.get(list_url, params=params, timeout=20, allow_redirects=False)
+
+        if r.status_code in (301, 302, 303, 307, 308):
+            location = r.headers.get("Location", "")
+            if "login" in location.lower() or "auth" in location.lower():
+                print(f"[CVT-PARTNERS] Cookie expirou (redirect → {location[:60]}). Renovar CIVITATIS_COOKIE.")
+                try:
+                    record_alert("CIVITATIS_COOKIE_EXPIRED",
+                                 "Cookie do partners.civitatis.com expirou",
+                                 "Faça login novamente e atualize CIVITATIS_COOKIE no Railway")
+                except Exception:
+                    pass
+                return None, None
+
+        if r.status_code != 200:
+            print(f"[CVT-PARTNERS] Listagem retornou {r.status_code}")
+            return None, None
+
+        html = r.text
+        pattern = re.compile(
+            r'href="[^"]*bookingId=([A-Za-z0-9+/=]+)[^"]*"[^>]*>\s*'
+            + re.escape(str(booking_number)),
+            re.IGNORECASE
+        )
+        m = pattern.search(html)
+        if not m:
+            pattern2 = re.compile(
+                re.escape(str(booking_number))
+                + r'[\s\S]{0,500}?bookingId=([A-Za-z0-9+/=]+)'
+            )
+            m = pattern2.search(html)
+        if not m:
+            print(f"[CVT-PARTNERS] Booking #{booking_number} não encontrado na listagem (últimos 30 dias)")
+            return None, None
+
+        hash1 = m.group(1)
+        print(f"[CVT-PARTNERS] Booking #{booking_number}: hash1 capturado ({len(hash1)} chars)")
+
+        detail_url = f"{CIVITATIS_BASE}/es/proveedores/v2/reservas/actividad/reserva"
+        r2 = s.get(detail_url, params={"bookingId": hash1, "type": "1"}, timeout=20)
+        if r2.status_code != 200:
+            print(f"[CVT-PARTNERS] Página de detalhe retornou {r2.status_code}")
+            return hash1, None
+
+        voucher_pattern = re.compile(
+            r'/es/voucher/' + re.escape(hash1) + r'/([A-Za-z0-9+/=]+)/1/pdf'
+        )
+        m2 = voucher_pattern.search(r2.text)
+        if not m2:
+            print(f"[CVT-PARTNERS] hash2 não encontrado na página de detalhe — voucher pode estar em chamada JS posterior")
+            return hash1, None
+
+        hash2 = m2.group(1)
+        print(f"[CVT-PARTNERS] Booking #{booking_number}: hash2 capturado ({len(hash2)} chars)")
+        _civitatis_hash_cache[cache_key] = (hash1, hash2)
+        return hash1, hash2
+
+    except Exception as e:
+        print(f"[CVT-PARTNERS] Erro ao buscar hashes do booking #{booking_number}: {e}")
+        return None, None
+
+
+def civitatis_download_voucher_pdf(hash1, hash2):
+    """Baixa o voucher PDF como bytes. Retorna bytes ou None."""
+    if not (hash1 and hash2):
+        return None
+    s = _get_civitatis_session()
+    url = f"{CIVITATIS_BASE}/es/voucher/{hash1}/{hash2}/1/pdf"
+    try:
+        r = s.get(url, timeout=30, allow_redirects=True)
+        if r.status_code == 200 and r.content[:4] == b"%PDF":
+            return r.content
+        print(f"[CVT-PARTNERS] Voucher PDF retornou {r.status_code} (size={len(r.content)})")
+        return None
+    except Exception as e:
+        print(f"[CVT-PARTNERS] Erro ao baixar voucher: {e}")
+        return None
+
+
+def civitatis_extract_phone_from_pdf(pdf_bytes):
+    """Extrai telefone do cliente do voucher PDF.
+
+    Layout do voucher:
+        DATOS DEL CLIENTE / GUEST DETAILS
+        <Nome>
+        <email>
+        (+CC) NUMERO   ← telefone do cliente
+
+    Retorna string formatada estilo "+51 920589513" ou None.
+    """
+    if not pdf_bytes:
+        return None
+    try:
+        import pdfplumber
+        from io import BytesIO
+        with pdfplumber.open(BytesIO(pdf_bytes)) as pdf:
+            text = "\n".join((page.extract_text() or "") for page in pdf.pages)
+    except ImportError:
+        print("[CVT-PARTNERS] pdfplumber não instalado — adicionar em requirements.txt")
+        return None
+    except Exception as e:
+        print(f"[CVT-PARTNERS] Erro ao abrir PDF: {e}")
+        return None
+
+    cliente_idx = re.search(r'DATOS\s+DEL\s+CLIENTE|GUEST\s+DETAILS', text, re.IGNORECASE)
+    if cliente_idx:
+        proveedor_idx = re.search(
+            r'DATOS\s+DEL\s+PROVEEDOR|PROVIDER\s+DETAILS|PERSONAS|PEOPLE',
+            text[cliente_idx.end():], re.IGNORECASE
+        )
+        if proveedor_idx:
+            region = text[cliente_idx.end():cliente_idx.end() + proveedor_idx.start()]
+        else:
+            region = text[cliente_idx.end():cliente_idx.end() + 500]
+    else:
+        region = text[:2000]
+
+    m = re.search(r'\(?\+(\d{1,3})\)?\s*(\d{6,15})', region)
+    if not m:
+        return None
+    return f"+{m.group(1)} {m.group(2)}"
+
+
+def civitatis_get_customer_phone(booking_number):
+    """Pipeline completo: booking_number → telefone do cliente.
+
+    Retorna telefone ou None. Não levanta exception.
+    """
+    if not booking_number or not CIVITATIS_COOKIE:
+        return None
+    hash1, hash2 = civitatis_find_booking_hashes(booking_number)
+    if not (hash1 and hash2):
+        return None
+    pdf = civitatis_download_voucher_pdf(hash1, hash2)
+    if not pdf:
+        return None
+    phone = civitatis_extract_phone_from_pdf(pdf)
+    if phone:
+        print(f"[CVT-PARTNERS] Telefone extraído pro booking #{booking_number}: {phone}")
+    return phone
+
+
 def _resolve_tour_id(codigo_lcx):
     """Search LCX tours by code (e.g. CHISAN067) and return the tourId."""
     if not lcx_client.logged_in:
@@ -852,6 +1072,16 @@ def build_lcx_sale(parsed_email):
         customer_name = "Cliente Civitatis"
     booking_num = data.get("booking_number", "")
     customer_name += f" *cvt* #{booking_num}" if booking_num else " *cvt*"
+
+    # CIVITATIS: extrair telefone do cliente via voucher PDF
+    # (a tela web só mostra o telefone 48h antes do tour, mas o
+    # voucher PDF tem desde sempre)
+    customer_phone = ""
+    try:
+        if booking_num:
+            customer_phone = civitatis_get_customer_phone(booking_num) or ""
+    except Exception as e:
+        print(f"[CVT-PARTNERS] Falha silenciosa ao buscar telefone do booking #{booking_num}: {e}")
 
     tour_name = nome_lcx or data.get("atividade", "Tour Civitatis")
     tour_date = data.get("data_iso", "")
@@ -952,7 +1182,7 @@ def build_lcx_sale(parsed_email):
                 "name": p.get("name", "Participante"),
                 "email": "",
                 "cpfPassport": p.get("cpfPassport", ""),
-                "whatsapp": p.get("whatsapp", ""),
+                "whatsapp": p.get("whatsapp", "") or customer_phone,
                 "dietaryRestrictionLabel": diet_labels,
             })
     # Fallback: use customer data if no detailed passengers
@@ -961,7 +1191,7 @@ def build_lcx_sale(parsed_email):
             "name": customer_name.replace(" *cvt*", ""),
             "email": data.get("email_cliente", ""),
             "cpfPassport": data.get("documento", ""),
-            "whatsapp": data.get("telefone", ""),
+            "whatsapp": data.get("telefone", "") or customer_phone,
         })
 
     # Resolve tourId from LCX via getTours API if we have a code
@@ -979,7 +1209,7 @@ def build_lcx_sale(parsed_email):
             "name": customer_name,
             "email": data.get("email_cliente", ""),
             "cpfPassport": data.get("documento", ""),
-            "whatsapp": data.get("telefone", ""),
+            "whatsapp": data.get("telefone", "") or customer_phone,
         },
         "tripCountry": country,
         "tripCity": city,
