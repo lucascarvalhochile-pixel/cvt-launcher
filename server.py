@@ -851,7 +851,22 @@ def civitatis_find_booking_id_hash(booking_number, max_pages=20):
 
     try:
         for page in range(1, max_pages + 1):
-            params = {"lang": "es", "page": str(page)}
+            today = datetime.now()
+            date_from = (today - timedelta(days=30)).strftime("%Y-%m-%d")
+            date_to = today.strftime("%Y-%m-%d")
+            params = {
+                "lang": "es",
+                "dateFrom": date_from,
+                "dateTo": date_to,
+                "destinations": "0",
+                "filterType": "r",
+                "grouped": "false",
+                "limit": "20",
+                "page": str(page),
+                "services": "0",
+                "short": "rd",
+                "status": "",
+            }
             r = s.get(list_url, params=params, timeout=20,
                       headers={"Accept": "application/json"},
                       allow_redirects=False)
