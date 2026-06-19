@@ -1356,6 +1356,8 @@ def fetch_new_booking_emails(max_results=10, since_hours=24):
                 parsed = parse_civitatis_email(msg)
                 if parsed:
                     parsed["email_id"] = eid.decode()
+                    # IMAP Message-ID header (RFC822) — único por email, sobrevive restart
+                    parsed["message_id"] = (msg.get("Message-ID") or msg.get("Message-Id") or "").strip()
                     # Extract email received date for filtering
                     try:
                         parsed["email_date"] = parsedate_to_datetime(msg["Date"]).replace(tzinfo=None)
@@ -1382,6 +1384,63 @@ _launched_bookings_cache = {"data": set(), "ts": None}
 # Cache de bookings já cancelados — usa Launch Log filtrando status="CANCELADO".
 # Em-memória pra evitar reprocessar cancelamento toda hora; recarrega do Sheets a cada 2 min.
 _cancelled_bookings_cache = {"data": set(), "ts": None}
+# Cache de Message-IDs já processados — dedup robusto que SOBREVIVE restart.
+# Cada email IMAP tem Message-ID único; se já vimos esse Message-ID, NÃO reprocessar
+# (independente de booking_exists no LCX, que tem lag de search).
+_processed_msgids_cache = {"data": set(), "ts": None}
+
+
+def _get_or_create_processed_emails_sheet(gc):
+    """Get or create the 'Processed Emails' worksheet."""
+    sh = gc.open_by_key(GSHEET_ID)
+    try:
+        ws = sh.worksheet("Processed Emails")
+    except gspread.WorksheetNotFound:
+        ws = sh.add_worksheet(title="Processed Emails", rows=2000, cols=4)
+        ws.update("A1:D1", [["Message-ID", "Booking #", "Timestamp", "Outcome"]])
+        print("[SHEETS] Created 'Processed Emails' worksheet")
+    return ws
+
+
+def load_processed_message_ids():
+    """Load set of already-processed IMAP Message-IDs from Sheets."""
+    now = datetime.now()
+    if _processed_msgids_cache["data"] and _processed_msgids_cache["ts"] and (now - _processed_msgids_cache["ts"]).seconds < 120:
+        return _processed_msgids_cache["data"]
+    try:
+        gc = _get_sheets_client()
+        if not gc:
+            return _processed_msgids_cache["data"]
+        ws = _get_or_create_processed_emails_sheet(gc)
+        all_rows = ws.get_all_values()
+        mids = set()
+        for row in all_rows[1:]:
+            if len(row) >= 1 and row[0].strip():
+                mids.add(row[0].strip())
+        mids = mids | _processed_msgids_cache["data"]
+        _processed_msgids_cache["data"] = mids
+        _processed_msgids_cache["ts"] = now
+        print(f"[SHEETS] Loaded {len(mids)} processed Message-IDs")
+        return mids
+    except Exception as e:
+        print(f"[SHEETS] load_processed_message_ids error: {e}")
+        return _processed_msgids_cache["data"]
+
+
+def record_processed_message_id(message_id, booking_number="", outcome="OK"):
+    """Record an IMAP Message-ID as processed in Sheets (idempotent dedup)."""
+    if not message_id:
+        return
+    # In-memory cache always updated first (immediate dedup within same scan)
+    _processed_msgids_cache["data"].add(message_id)
+    try:
+        gc = _get_sheets_client()
+        if not gc:
+            return
+        ws = _get_or_create_processed_emails_sheet(gc)
+        ws.append_row([message_id, booking_number, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), outcome], value_input_option="USER_ENTERED")
+    except Exception as e:
+        print(f"[SHEETS] record_processed_message_id error: {e}")
 
 
 def load_cancelled_bookings():
@@ -1761,6 +1820,8 @@ def auto_scan_worker():
 
             # Load already-launched bookings from in-memory cache
             launched_bookings = load_launched_bookings()
+            # Load already-processed Message-IDs (dedup robusto que sobrevive restart)
+            processed_msgids = load_processed_message_ids()
 
             # CRITICAL: ensure LCX login BEFORE processing any bookings
             if not lcx_client.logged_in:
@@ -1774,9 +1835,18 @@ def auto_scan_worker():
 
             for em in new_bookings:
                 booking_num = em.get("booking_number", "")
+                msg_id = em.get("message_id", "")
+
+                # DEDUP ROBUSTO: Message-ID já processado (sobrevive restart, sem lag de LCX search)
+                if msg_id and msg_id in processed_msgids:
+                    skipped += 1
+                    continue
 
                 # DEDUP: check if booking already exists in LCX (searches vendas page)
                 if booking_num in launched_bookings:
+                    # Mesmo que já lançado, marcar msg_id como processado pra evitar nova checagem
+                    if msg_id:
+                        record_processed_message_id(msg_id, booking_num, "DEDUP_BY_BOOKING")
                     skipped += 1
                     continue
                 if lcx_client.booking_exists(booking_num):
@@ -1841,6 +1911,10 @@ def auto_scan_worker():
                         except Exception as e_urg:
                             print(f"[URGENTE] Erro ao calcular horas até o tour: {e_urg}")
 
+                # Marcar Message-ID como processado (sucesso OU erro — evita reprocessar mesmo email no próximo scan)
+                if msg_id:
+                    record_processed_message_id(msg_id, booking_num, status)
+
                 if result.get("success"):
                     launched += 1
                 else:
@@ -1856,9 +1930,16 @@ def auto_scan_worker():
 
             for em in cancellations:
                 booking_num = em.get("booking_number", "")
+                msg_id = em.get("message_id", "")
                 if not booking_num:
                     continue
+                # DEDUP ROBUSTO por Message-ID
+                if msg_id and msg_id in processed_msgids:
+                    cancel_skipped += 1
+                    continue
                 if booking_num in cancelled_cache:
+                    if msg_id:
+                        record_processed_message_id(msg_id, booking_num, "DEDUP_CANCEL")
                     cancel_skipped += 1
                     continue
                 # Find sale_id pelo *cvt* #BOOKING
@@ -1882,6 +1963,9 @@ def auto_scan_worker():
                     cancel_errors += 1
                     print(f"[CANCEL] Booking #{booking_num} falhou: {res.get('error')}")
                     record_alert("CANCEL_FALHOU", f"Cancelamento #{booking_num} falhou", res.get("error", ""))
+                # Marcar processado independente de sucesso pra não reprocessar
+                if msg_id:
+                    record_processed_message_id(msg_id, booking_num, "CANCEL_OK" if res.get("success") else "CANCEL_ERR")
 
             summary = f"found={len(new_bookings)} launched={launched} skipped={skipped} errors={errors} | cancelations={len(cancellations)} cancelled={cancelled_count} cancel_skip={cancel_skipped} cancel_err={cancel_errors}"
             auto_scan_status["last_result"] = summary
