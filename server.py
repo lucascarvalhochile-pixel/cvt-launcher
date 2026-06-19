@@ -1297,12 +1297,14 @@ def build_lcx_sale(parsed_email):
         for item in items:
             item["tourId"] = tour_id
 
+    final_customer_whatsapp = customer_phone or data.get("telefone", "")
+
     sale = {
         "customer": {
             "name": customer_name,
             "email": data.get("email_cliente", ""),
             "cpfPassport": data.get("documento", ""),
-            "whatsapp": customer_phone or data.get("telefone", ""),  # voucher prioridade
+            "whatsapp": final_customer_whatsapp,  # voucher prioridade
         },
         "tripCountry": country,
         "tripCity": city,
@@ -1316,6 +1318,19 @@ def build_lcx_sale(parsed_email):
         "participants": participants,
         "notes": notes,
     }
+
+    # DEBUG: log build details so we can inspect what was sent to create_sale
+    _add_build_debug({
+        "ts": datetime.now().isoformat(),
+        "booking": booking_num,
+        "customer_phone_from_voucher": customer_phone,
+        "data_telefone_from_email": data.get("telefone", ""),
+        "passageiros_whatsapp": [p.get("whatsapp", "") for p in (data.get("passageiros") or [])],
+        "FINAL_customer_whatsapp_sent": final_customer_whatsapp,
+        "FINAL_participants_whatsapp_sent": [p.get("whatsapp", "") for p in participants],
+        "codigo_lcx": codigo_lcx,
+        "tour_name": tour_name,
+    })
 
     return sale, codigo_lcx
 
@@ -1381,6 +1396,15 @@ def fetch_new_booking_emails(max_results=10, since_hours=24):
 # launched booking numbers. Survives Railway deploys (no more duplicates).
 
 _launched_bookings_cache = {"data": set(), "ts": None}
+# Debug log: últimas 20 builds de venda — pra inspecionar o que foi enviado ao create_sale
+_build_debug_log = []
+
+
+def _add_build_debug(entry):
+    """Push debug entry to in-memory log (keeps last 20)."""
+    _build_debug_log.append(entry)
+    while len(_build_debug_log) > 20:
+        _build_debug_log.pop(0)
 # Cache de bookings já cancelados — usa Launch Log filtrando status="CANCELADO".
 # Em-memória pra evitar reprocessar cancelamento toda hora; recarrega do Sheets a cada 2 min.
 _cancelled_bookings_cache = {"data": set(), "ts": None}
@@ -2114,6 +2138,12 @@ def test_cancel():
 def api_auto_scan_status():
     """Check auto-scan status."""
     return jsonify(auto_scan_status)
+
+
+@app.route("/api/build-debug")
+def api_build_debug():
+    """Return last 20 build_lcx_sale debug entries (telefone tracing)."""
+    return jsonify(_build_debug_log[-20:])
 
 
 @app.route("/api/daily-summary", methods=["POST"])
