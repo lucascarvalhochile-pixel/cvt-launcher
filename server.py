@@ -1275,7 +1275,7 @@ def build_lcx_sale(parsed_email):
                 "name": p.get("name", "Participante"),
                 "email": "",
                 "cpfPassport": p.get("cpfPassport", ""),
-                "whatsapp": p.get("whatsapp", "") or customer_phone,
+                "whatsapp": customer_phone or p.get("whatsapp", ""),  # voucher prioridade (telefone do cliente real, não da agência)
                 "dietaryRestrictionLabel": diet_labels,
             })
     # Fallback: use customer data if no detailed passengers
@@ -1284,7 +1284,7 @@ def build_lcx_sale(parsed_email):
             "name": customer_name.replace(" *cvt*", ""),
             "email": data.get("email_cliente", ""),
             "cpfPassport": data.get("documento", ""),
-            "whatsapp": data.get("telefone", "") or customer_phone,
+            "whatsapp": customer_phone or data.get("telefone", ""),  # voucher prioridade
         })
 
     # Resolve tourId from LCX via getTours API if we have a code
@@ -1302,7 +1302,7 @@ def build_lcx_sale(parsed_email):
             "name": customer_name,
             "email": data.get("email_cliente", ""),
             "cpfPassport": data.get("documento", ""),
-            "whatsapp": data.get("telefone", "") or customer_phone,
+            "whatsapp": customer_phone or data.get("telefone", ""),  # voucher prioridade
         },
         "tripCountry": country,
         "tripCity": city,
