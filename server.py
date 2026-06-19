@@ -59,6 +59,7 @@ ACTION_CREATE_SALE = "6024226eda08008482776caa1f0eec41c77e39fabb"
 ACTION_GET_TOURS = "404f70165733d2997d26c9cb8d91af217945a7f4ac"
 ACTION_UPDATE_SALE_STATUS = "40ab2f34a78e7b654f3a882179d1da5f74e49d7c0d"
 ACTION_UPDATE_SALE_ITEM_STATUS = "70addf61e1e11616d0d7a75169b29b25a436d711bc"
+ACTION_UPDATE_SALE = "70804be85fc4b49c51d744f493e0b563faea8a6b4a"  # Edit full sale; accepts partial payload like {notes: "..."}
 
 # Auto-scan config
 AUTO_SCAN_INTERVAL = int(os.environ.get("AUTO_SCAN_INTERVAL", "300"))  # 5 min
@@ -702,6 +703,79 @@ class LCXClient:
         except Exception as e:
             return {"success": False, "error": str(e)}
 
+    def get_sale_notes(self, sale_id):
+        """Read current internal notes of a sale by scraping the edit page textarea."""
+        if not self.logged_in:
+            if not self.login():
+                return None
+        try:
+            r = self.session.get(
+                f"{LCX_BASE}/dashboard/vendas/{sale_id}/editar",
+                headers={"Accept": "text/html"},
+                timeout=15,
+            )
+            if r.status_code == 200:
+                # Look for textarea name="notes" — Next.js renders default value as innerText
+                m = re.search(r'<textarea[^>]*name="notes"[^>]*>([\s\S]*?)</textarea>', r.text)
+                if m:
+                    # Decode HTML entities
+                    notes = m.group(1)
+                    notes = notes.replace("&lt;", "<").replace("&gt;", ">").replace("&amp;", "&").replace("&quot;", '"').replace("&#x27;", "'").replace("&#39;", "'")
+                    return notes
+            return ""
+        except Exception as e:
+            print(f"[LCX] Error reading notes for {sale_id}: {e}")
+            return None
+
+    def update_sale_notes(self, sale_id, new_notes):
+        """Update internal notes of a sale via ACTION_UPDATE_SALE with minimal payload.
+        IMPORTANT: this REPLACES the notes field — caller must concat with existing notes if append desired."""
+        if not self.logged_in:
+            if not self.login():
+                return {"success": False, "error": "Login failed"}
+        try:
+            payload = json.dumps([sale_id, {"notes": new_notes}])
+            r = self.session.post(
+                f"{LCX_BASE}/dashboard/vendas/{sale_id}/editar",
+                data=payload.encode("utf-8"),
+                headers={
+                    "Next-Action": ACTION_UPDATE_SALE,
+                    "Content-Type": "text/plain;charset=UTF-8",
+                    "Accept": "text/x-component",
+                },
+                timeout=30,
+            )
+            if r.status_code == 200:
+                return {"success": True}
+            return {"success": False, "error": f"HTTP {r.status_code}: {r.text[:300]}"}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    def cancel_sale_full(self, sale_id, booking_number, email_date_str):
+        """Orchestrate cancellation: append note + change status → CANCELED.
+        email_date_str: human-readable date/time from the cancellation email (e.g. "19/06/2026 14:32")."""
+        # 1. Read current notes
+        current = self.get_sale_notes(sale_id)
+        if current is None:
+            current = ""
+
+        # 2. Append cancellation observation (idempotent — skip if already present)
+        cancel_marker = f"Cancelada via email Civitatis em {email_date_str}"
+        if cancel_marker in current:
+            print(f"[CANCEL] Sale {sale_id} already has cancellation note — skipping notes update")
+        else:
+            new_notes = (current.rstrip() + " | " + cancel_marker) if current.strip() else cancel_marker
+            notes_res = self.update_sale_notes(sale_id, new_notes)
+            if not notes_res.get("success"):
+                print(f"[CANCEL] WARN: failed to update notes for {sale_id}: {notes_res.get('error')}")
+
+        # 3. Change status to CANCELED
+        status_res = self.update_sale_status(sale_id, "CANCELED")
+        if not status_res.get("success"):
+            return {"success": False, "error": f"Status update failed: {status_res.get('error')}", "sale_id": sale_id}
+
+        return {"success": True, "sale_id": sale_id, "booking_number": booking_number, "cancel_marker": cancel_marker}
+
     def find_sale_id(self, booking_number):
         """Search LCX for a sale with *cvt* #BOOKING and return its sale_id.
         Used after createSale when the RSC response doesn't return a clear sale_id."""
@@ -1258,6 +1332,33 @@ def fetch_new_booking_emails(max_results=10, since_hours=24):
 # launched booking numbers. Survives Railway deploys (no more duplicates).
 
 _launched_bookings_cache = {"data": set(), "ts": None}
+# Cache de bookings já cancelados — usa Launch Log filtrando status="CANCELADO".
+# Em-memória pra evitar reprocessar cancelamento toda hora; recarrega do Sheets a cada 2 min.
+_cancelled_bookings_cache = {"data": set(), "ts": None}
+
+
+def load_cancelled_bookings():
+    """Load set of already-cancelled booking numbers from Launch Log (status=CANCELADO)."""
+    now = datetime.now()
+    if _cancelled_bookings_cache["data"] and _cancelled_bookings_cache["ts"] and (now - _cancelled_bookings_cache["ts"]).seconds < 120:
+        return _cancelled_bookings_cache["data"]
+    try:
+        gc = _get_sheets_client()
+        if not gc:
+            return _cancelled_bookings_cache["data"]
+        ws = _get_or_create_log_sheet(gc)
+        all_rows = ws.get_all_values()
+        cancelled = set()
+        for row in all_rows[1:]:
+            if len(row) >= 4 and row[0].strip() and row[3].strip().upper() == "CANCELADO":
+                cancelled.add(row[0].strip())
+        cancelled = cancelled | _cancelled_bookings_cache["data"]
+        _cancelled_bookings_cache["data"] = cancelled
+        _cancelled_bookings_cache["ts"] = now
+        return cancelled
+    except Exception as e:
+        print(f"[SHEETS] load_cancelled_bookings error: {e}")
+        return _cancelled_bookings_cache["data"]
 
 def _get_sheets_client():
     """Get authenticated gspread client with read/write access."""
@@ -1698,7 +1799,44 @@ def auto_scan_worker():
                 else:
                     errors += 1
 
-            summary = f"found={len(new_bookings)} launched={launched} skipped={skipped} errors={errors}"
+            # ===== CANCELAMENTOS =====
+            # Processar emails type=CANCELAMENTO: muda status LCX → CANCELED + nota com data/hora do email
+            cancellations = [e for e in emails if e.get("type") == "CANCELAMENTO"]
+            cancelled_count = 0
+            cancel_skipped = 0
+            cancel_errors = 0
+            cancelled_cache = load_cancelled_bookings()
+
+            for em in cancellations:
+                booking_num = em.get("booking_number", "")
+                if not booking_num:
+                    continue
+                if booking_num in cancelled_cache:
+                    cancel_skipped += 1
+                    continue
+                # Find sale_id pelo *cvt* #BOOKING
+                sale_id = lcx_client.find_sale_id(booking_num)
+                if not sale_id:
+                    print(f"[CANCEL] Booking #{booking_num} não tem venda no LCX — ignorando cancelamento")
+                    _cancelled_bookings_cache["data"].add(booking_num)  # Cache pra não reprocessar
+                    cancel_skipped += 1
+                    continue
+                # Data/hora do email pra observação
+                email_dt = em.get("email_date")
+                email_date_str = email_dt.strftime("%d/%m/%Y %H:%M") if email_dt else "data desconhecida"
+                # Executar cancelamento
+                res = lcx_client.cancel_sale_full(sale_id, booking_num, email_date_str)
+                if res.get("success"):
+                    cancelled_count += 1
+                    _cancelled_bookings_cache["data"].add(booking_num)
+                    record_launch(booking_num, "", "CANCELADO", sale_id, em.get("atividade", ""))
+                    print(f"[CANCEL] Booking #{booking_num} cancelado no LCX (sale {sale_id})")
+                else:
+                    cancel_errors += 1
+                    print(f"[CANCEL] Booking #{booking_num} falhou: {res.get('error')}")
+                    record_alert("CANCEL_FALHOU", f"Cancelamento #{booking_num} falhou", res.get("error", ""))
+
+            summary = f"found={len(new_bookings)} launched={launched} skipped={skipped} errors={errors} | cancelations={len(cancellations)} cancelled={cancelled_count} cancel_skip={cancel_skipped} cancel_err={cancel_errors}"
             auto_scan_status["last_result"] = summary
             auto_scan_status["running"] = False
             print(f"[AUTO-SCAN] {summary}")
@@ -1758,6 +1896,30 @@ def test_civitatis_phone():
                         "has_provider_hash": bool(CIVITATIS_PROVIDER_HASH)})
     phone = civitatis_get_phone_from_api(id_hash)
     return jsonify({"booking": booking, "id_hash_len": len(id_hash), "phone": phone or "NOT EXTRACTED"})
+
+
+@app.route("/api/test-cancel", methods=["POST"])
+def test_cancel():
+    """Manual cancellation test endpoint.
+    POST {"booking": "12345678", "email_date": "DD/MM/AAAA HH:MM"}
+    Finds *cvt* #BOOKING in LCX, appends cancellation note + sets status CANCELED."""
+    body = request.get_json(silent=True) or {}
+    booking = (body.get("booking") or "").strip()
+    email_date = (body.get("email_date") or datetime.now().strftime("%d/%m/%Y %H:%M")).strip()
+    dry_run = bool(body.get("dry_run", False))
+    if not booking:
+        return jsonify({"error": "missing 'booking' in JSON body"}), 400
+    if not lcx_client.logged_in and not lcx_client.login():
+        return jsonify({"error": "LCX login failed"}), 502
+    sale_id = lcx_client.find_sale_id(booking)
+    if not sale_id:
+        return jsonify({"booking": booking, "found": False, "msg": "Não existe venda *cvt* no LCX pra esse booking"})
+    if dry_run:
+        current = lcx_client.get_sale_notes(sale_id)
+        return jsonify({"booking": booking, "sale_id": sale_id, "dry_run": True, "current_notes": current,
+                        "would_append": f"Cancelada via email Civitatis em {email_date}"})
+    res = lcx_client.cancel_sale_full(sale_id, booking, email_date)
+    return jsonify(res)
 
 
 @app.route("/api/auto-scan-status")
