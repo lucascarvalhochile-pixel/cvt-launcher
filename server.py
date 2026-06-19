@@ -926,7 +926,7 @@ def civitatis_get_phone_from_api(id_hash):
     s = _get_civitatis_session()
     url = f"{CIVITATIS_BASE}/api/providers/booking/{CIVITATIS_PROVIDER_HASH}/{id_hash}"
     try:
-        r = s.get(url, params={"lang": "es"}, timeout=15,
+        r = s.get(url, params={"lang": "es", "type": "1"}, timeout=15,
                   headers={"Accept": "application/json"})
         if r.status_code != 200:
             print(f"[CVT-PARTNERS] API booking detalhe retornou {r.status_code}")
