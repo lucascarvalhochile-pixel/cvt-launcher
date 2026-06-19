@@ -1967,7 +1967,59 @@ def auto_scan_worker():
                 if msg_id:
                     record_processed_message_id(msg_id, booking_num, "CANCEL_OK" if res.get("success") else "CANCEL_ERR")
 
-            summary = f"found={len(new_bookings)} launched={launched} skipped={skipped} errors={errors} | cancelations={len(cancellations)} cancelled={cancelled_count} cancel_skip={cancel_skipped} cancel_err={cancel_errors}"
+            # ===== MODIFICAÇÕES =====
+            # Processar emails type=MODIFICACAO: NÃO muda status, só anota na obs interna
+            # "Em DD/MM/AAAA HH:MM cliente alterou via email Civitatis"
+            modifications = [e for e in emails if e.get("type") == "MODIFICACAO"]
+            modified_count = 0
+            mod_skipped = 0
+            mod_errors = 0
+
+            for em in modifications:
+                booking_num = em.get("booking_number", "")
+                msg_id = em.get("message_id", "")
+                if not booking_num:
+                    continue
+                # DEDUP por Message-ID (cada modificação é um email único)
+                if msg_id and msg_id in processed_msgids:
+                    mod_skipped += 1
+                    continue
+                # Find sale no LCX
+                sale_id = lcx_client.find_sale_id(booking_num)
+                if not sale_id:
+                    print(f"[MOD] Booking #{booking_num} não tem venda no LCX — ignorando modificação")
+                    if msg_id:
+                        record_processed_message_id(msg_id, booking_num, "MOD_NO_SALE")
+                    mod_skipped += 1
+                    continue
+                # Data/hora do email
+                email_dt = em.get("email_date")
+                email_date_str = email_dt.strftime("%d/%m/%Y %H:%M") if email_dt else "data desconhecida"
+                # Ler current notes
+                current = lcx_client.get_sale_notes(sale_id)
+                if current is None:
+                    current = ""
+                mod_marker = f"Modificada via email Civitatis em {email_date_str}"
+                # Idempotência: se essa marca exata já está, skip
+                if mod_marker in current:
+                    if msg_id:
+                        record_processed_message_id(msg_id, booking_num, "MOD_DUPLICATE")
+                    mod_skipped += 1
+                    continue
+                new_notes = (current.rstrip() + " | " + mod_marker) if current.strip() else mod_marker
+                res = lcx_client.update_sale_notes(sale_id, new_notes)
+                if res.get("success"):
+                    modified_count += 1
+                    record_launch(booking_num, "", "MODIFICADO", sale_id, em.get("atividade", ""))
+                    print(f"[MOD] Booking #{booking_num} modificação anotada no LCX (sale {sale_id})")
+                else:
+                    mod_errors += 1
+                    print(f"[MOD] Booking #{booking_num} falhou: {res.get('error')}")
+                    record_alert("MOD_FALHOU", f"Modificação #{booking_num} falhou", res.get("error", ""))
+                if msg_id:
+                    record_processed_message_id(msg_id, booking_num, "MOD_OK" if res.get("success") else "MOD_ERR")
+
+            summary = f"found={len(new_bookings)} launched={launched} skipped={skipped} errors={errors} | cancelations={len(cancellations)} cancelled={cancelled_count} cancel_skip={cancel_skipped} cancel_err={cancel_errors} | mods={len(modifications)} modified={modified_count} mod_skip={mod_skipped} mod_err={mod_errors}"
             auto_scan_status["last_result"] = summary
             auto_scan_status["running"] = False
             print(f"[AUTO-SCAN] {summary}")
