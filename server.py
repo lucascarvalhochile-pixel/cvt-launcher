@@ -1936,13 +1936,18 @@ def test_civitatis_phone():
     booking = request.args.get("booking", "").strip()
     if not booking:
         return jsonify({"error": "missing booking query param"}), 400
+    # Try fast-path first (direct numeric ID)
+    phone_fast = civitatis_get_phone_by_booking_id(booking)
+    if phone_fast:
+        return jsonify({"booking": booking, "step": "fast_path", "phone": phone_fast})
+    # Fallback: id_hash via pagination
     id_hash = civitatis_find_booking_id_hash(booking)
     if not id_hash:
         return jsonify({"booking": booking, "step": "find_id_hash", "result": "NOT FOUND",
                         "has_cookie": bool(CIVITATIS_COOKIE),
                         "has_provider_hash": bool(CIVITATIS_PROVIDER_HASH)})
     phone = civitatis_get_phone_from_api(id_hash)
-    return jsonify({"booking": booking, "id_hash_len": len(id_hash), "phone": phone or "NOT EXTRACTED"})
+    return jsonify({"booking": booking, "step": "idhash_fallback", "id_hash_len": len(id_hash), "phone": phone or "NOT EXTRACTED"})
 
 
 @app.route("/api/test-cancel", methods=["POST"])
