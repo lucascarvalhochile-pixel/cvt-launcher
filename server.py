@@ -1025,19 +1025,63 @@ def civitatis_get_phone_from_api(id_hash):
         return None
 
 
+def civitatis_get_phone_by_booking_id(booking_number):
+    """FAST PATH: tenta pegar telefone direto com booking ID numérico.
+    Endpoint /api/providers/booking/{HASH}/{ID_NUMERIC}?lang=es&type=1 aceita ID numérico
+    diretamente — sem precisar paginar lista pra achar idHash. Retorna phone ou None.
+    """
+    if not booking_number or not CIVITATIS_COOKIE or not CIVITATIS_PROVIDER_HASH:
+        return None
+    url = f"{CIVITATIS_BASE}/api/providers/booking/{CIVITATIS_PROVIDER_HASH}/{booking_number}"
+    headers = {
+        "Cookie": CIVITATIS_COOKIE,
+        "User-Agent": CIVITATIS_USER_AGENT,
+        "Accept": "application/json",
+        "Accept-Language": "es-ES,es;q=0.9,en;q=0.8",
+        "Referer": f"{CIVITATIS_BASE}/es/proveedores/v2/reservas/",
+    }
+    try:
+        r = requests.get(url, headers=headers, params={"lang": "es", "type": "1"}, timeout=15, allow_redirects=False)
+        if r.status_code != 200:
+            return None
+        try:
+            data = r.json()
+        except Exception:
+            return None
+        phone = data.get("travellerPhone") or data.get("phone")
+        if phone:
+            return str(phone).strip()
+        return None
+    except Exception as e:
+        print(f"[CVT-PARTNERS] Fast-path phone error for #{booking_number}: {e}")
+        return None
+
+
 def civitatis_get_customer_phone(booking_number):
     """Pipeline completo: booking_number → telefone do cliente via API JSON.
+
+    Estratégia:
+    1. FAST PATH (1 chamada): endpoint detail direto com ID numérico
+    2. FALLBACK: paginar lista → achar idHash → buscar detail (mais lento)
 
     Retorna telefone formatado (+CC NUMERO) ou None. Não levanta exception.
     """
     if not booking_number or not CIVITATIS_COOKIE:
         return None
+
+    # 1. Fast path
+    phone = civitatis_get_phone_by_booking_id(booking_number)
+    if phone:
+        print(f"[CVT-PARTNERS] Telefone (fast-path) pro #{booking_number}: {phone}")
+        return phone
+
+    # 2. Fallback: idHash via paginação
     id_hash = civitatis_find_booking_id_hash(booking_number)
     if not id_hash:
         return None
     phone = civitatis_get_phone_from_api(id_hash)
     if phone:
-        print(f"[CVT-PARTNERS] Telefone extraído pro booking #{booking_number}: {phone}")
+        print(f"[CVT-PARTNERS] Telefone (idHash fallback) pro #{booking_number}: {phone}")
     return phone
 
 
