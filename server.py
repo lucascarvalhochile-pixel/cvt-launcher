@@ -704,23 +704,26 @@ class LCXClient:
             return {"success": False, "error": str(e)}
 
     def get_sale_notes(self, sale_id):
-        """Read current internal notes of a sale by scraping the edit page textarea."""
+        """Read current internal notes by parsing the SSR payload of the DETAIL page.
+        The /editar page is CSR-only (no inline data). The detail page /dashboard/vendas/{id}
+        inlines the RSC payload with escaped JSON, e.g. \\"notes\\":\\"VALUE\\"."""
         if not self.logged_in:
             if not self.login():
                 return None
         try:
             r = self.session.get(
-                f"{LCX_BASE}/dashboard/vendas/{sale_id}/editar",
+                f"{LCX_BASE}/dashboard/vendas/{sale_id}",  # DETAIL page, not /editar
                 headers={"Accept": "text/html"},
                 timeout=15,
             )
             if r.status_code == 200:
-                # Look for textarea name="notes" — Next.js renders default value as innerText
-                m = re.search(r'<textarea[^>]*name="notes"[^>]*>([\s\S]*?)</textarea>', r.text)
+                # Match \"notes\":\"VALUE\" — escaped JSON inside RSC payload
+                # Group 1 captures value chars: anything that isn't \ or " literal, OR an escape sequence \X
+                m = re.search(r'\\"notes\\":\\"((?:[^\\"]|\\.)*?)\\"', r.text)
                 if m:
-                    # Decode HTML entities
-                    notes = m.group(1)
-                    notes = notes.replace("&lt;", "<").replace("&gt;", ">").replace("&amp;", "&").replace("&quot;", '"').replace("&#x27;", "'").replace("&#39;", "'")
+                    raw = m.group(1)
+                    # Unescape JSON-style escapes back to real chars
+                    notes = raw.replace('\\"', '"').replace('\\n', '\n').replace('\\/', '/').replace('\\\\', '\\')
                     return notes
             return ""
         except Exception as e:
