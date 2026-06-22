@@ -20,6 +20,13 @@ import threading
 import time
 import requests
 from bs4 import BeautifulSoup
+# Bokun integration
+try:
+    from bokun_integration import BokunClient, BOKUN_TO_LCX
+    _BOKUN_IMPORT_OK = True
+except Exception as _e:
+    print(f"[BOKUN] import failed: {_e}")
+    _BOKUN_IMPORT_OK = False
 from flask import Flask, request, jsonify
 import gspread
 from google.oauth2.service_account import Credentials
@@ -63,6 +70,9 @@ ACTION_UPDATE_SALE = "70804be85fc4b49c51d744f493e0b563faea8a6b4a"  # Edit full s
 
 # Auto-scan config
 AUTO_SCAN_INTERVAL = int(os.environ.get("AUTO_SCAN_INTERVAL", "300"))  # 5 min
+BOKUN_ACCESS_KEY = os.environ.get("BOKUN_ACCESS_KEY", "")
+BOKUN_SECRET_KEY = os.environ.get("BOKUN_SECRET_KEY", "")
+BOKUN_ENABLED = bool(BOKUN_ACCESS_KEY and BOKUN_SECRET_KEY and _BOKUN_IMPORT_OK)
 GO_LIVE_DATE = os.environ.get("GO_LIVE_DATE", "2026-04-18")  # Dedup now via LCX search (no Google Sheets needed)
 LAUNCH_CUTOFF = os.environ.get("LAUNCH_CUTOFF", "2026-05-26T17:45:00")  # Skip old emails before this deploy
 auto_scan_status = {"last_run": None, "last_result": None, "running": False}
@@ -2069,6 +2079,92 @@ def auto_scan_worker():
             print(f"[AUTO-SCAN ERROR] {e}")
             traceback.print_exc()
             record_alert("EXCEPTION", f"Auto-scan crash: {type(e).__name__}", str(e)[:500])
+
+        # BOKUN poller: check new bookings via Bokun API (Viator/GYG/Despegar etc)
+        if BOKUN_ENABLED:
+            try:
+                bokun = BokunClient(BOKUN_ACCESS_KEY, BOKUN_SECRET_KEY)
+                items = bokun.list_recent_bookings(since_minutes=15)
+                bk_found = len(items)
+                bk_launched = bk_skipped = bk_errors = 0
+                for bk in items:
+                    cc = bk.get("confirmationCode", "")
+                    key = f"BKN{cc}"
+                    cached = _launched_bookings_cache.get("data", set())
+                    if key in cached:
+                        bk_skipped += 1
+                        continue
+                    try:
+                        if lcx_client.booking_exists(key):
+                            bk_skipped += 1
+                            cached.add(key)
+                            continue
+                    except Exception:
+                        bk_skipped += 1
+                        continue
+                    try:
+                        first_pb = (bk.get("productBookings") or [{}])[0]
+                        activity = first_pb.get("activity", {}) or {}
+                        bk_activity_id = str(activity.get("id", ""))
+                        codigo_lcx = BOKUN_TO_LCX.get(bk_activity_id)
+                        if not codigo_lcx:
+                            print(f"[BOKUN] no LCX mapping for activity {bk_activity_id}")
+                            bk_skipped += 1
+                            continue
+                        tour_id = _resolve_tour_id(codigo_lcx)
+                        customer = bk.get("customer", {}) or {}
+                        customer_name = (str(customer.get("firstName", "")) + " " + str(customer.get("lastName", ""))).strip() or "Cliente Bokun"
+                        passengers = first_pb.get("passengers", []) or []
+                        n_pax = len(passengers) or int(first_pb.get("totalParticipants", 1))
+                        net_price = float(first_pb.get("vendorPayoutAmount") or first_pb.get("netPrice") or first_pb.get("totalPrice", 0))
+                        tour_date = first_pb.get("startDate") or first_pb.get("startDateTime", "")[:10]
+                        channel = (bk.get("channel") or {}).get("title", "BOKUN")
+                        sale_data = {
+                            "customer": {
+                                "name": f"{customer_name} *bkn* #{cc}",
+                                "email": customer.get("email", ""),
+                                "cpfPassport": customer.get("passportId", "") or customer.get("nationalId", ""),
+                                "whatsapp": customer.get("phoneNumber", "") or customer.get("mobile", ""),
+                            },
+                            "tripCountry": "Chile",
+                            "tripCity": "Santiago",
+                            "meetingPoint": first_pb.get("meetingPoint", "") or first_pb.get("pickupPlace", ""),
+                            "tripStartDate": tour_date,
+                            "tripEndDate": tour_date,
+                            "numberOfPeople": n_pax,
+                            "status": "CONFIRMED",
+                            "items": [{
+                                "country": "Chile",
+                                "city": "Santiago",
+                                "tourName": activity.get("title", codigo_lcx),
+                                "tourId": tour_id,
+                                "priceTier": "ADULT",
+                                "numberOfPeople": n_pax,
+                                "tourDate": tour_date,
+                                "price": net_price,
+                                "isGift": False,
+                            }],
+                            "payments": [{"method": "CASH", "amount": net_price, "status": "paid"}],
+                            "participants": [{
+                                "name": ((str(p.get("firstName", "")) + " " + str(p.get("lastName", ""))).strip() or customer_name),
+                                "cpfPassport": p.get("passportId", "") or p.get("nationalId", ""),
+                                "whatsapp": p.get("phoneNumber", "") or customer.get("phoneNumber", ""),
+                                "dietaryRestrictionLabel": [],
+                            } for p in passengers] or [{"name": customer_name, "cpfPassport": "", "whatsapp": "", "dietaryRestrictionLabel": []}],
+                            "notes": f"Reserva Bokun #{cc} | Canal: {channel} | Liquido: R$ {net_price:.2f} | Pax: {n_pax}",
+                        }
+                        res = lcx_client.create_sale(sale_data)
+                        if res and res.get("ok"):
+                            bk_launched += 1
+                            cached.add(key)
+                        else:
+                            bk_errors += 1
+                    except Exception as bk_e:
+                        print(f"[BOKUN] error processing #{cc}: {bk_e}")
+                        bk_errors += 1
+                print(f"[BOKUN] found={bk_found} launched={bk_launched} skipped={bk_skipped} errors={bk_errors}")
+            except Exception as bk_exc:
+                print(f"[BOKUN] scan failed: {bk_exc}")
 
         time.sleep(AUTO_SCAN_INTERVAL)
 
