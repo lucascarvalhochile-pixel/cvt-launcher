@@ -1450,6 +1450,10 @@ def load_processed_message_ids():
         mids = set()
         for row in all_rows[1:]:
             if len(row) >= 1 and row[0].strip():
+                # FIX 24/06/2026: ignorar outcomes ERRO/CANCEL_ERR/MODIFY_ERR para permitir retry
+                outcome = row[3].strip().upper() if len(row) >= 4 else ""
+                if outcome == "ERRO" or outcome.endswith("ERR"):
+                    continue
                 mids.add(row[0].strip())
         mids = mids | _processed_msgids_cache["data"]
         _processed_msgids_cache["data"] = mids
