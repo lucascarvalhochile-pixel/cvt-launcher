@@ -529,11 +529,17 @@ def parse_text_body(text, booking_number, subject):
     data["preco_liquido"] = parse_brl(preco_liquido)
 
     # Customer data (from "Dados do cliente" section)
-    nome = re.search(r'Nome:\s*\n?\s*(.+)', text)
-    sobrenomes = re.search(r'Sobrenomes?:\s*\n?\s*(.+)', text)
+    # Restrict to same line ([^\n]*) so empty value does NOT capture next field's value
+    nome = re.search(r'Nome:[ \t]*([^\n]*)', text)
+    sobrenomes = re.search(r'Sobrenomes?:[ \t]*([^\n]*)', text)
 
     data["nome"] = nome.group(1).strip() if nome else ""
     data["sobrenomes"] = sobrenomes.group(1).strip() if sobrenomes else ""
+
+    # Defense: strip trailing time pattern like " 5:00 AM", " 14:00" leaked from other fields
+    _TIME_TRAIL = re.compile(r'\s+\d{1,2}:\d{2}\s*(?:[ap]\.?\s*m\.?)?\s*$', re.IGNORECASE)
+    data["nome"] = _TIME_TRAIL.sub("", data["nome"]).strip()
+    data["sobrenomes"] = _TIME_TRAIL.sub("", data["sobrenomes"]).strip()
 
     # Comentários
     comentario = re.search(r'Coment[áa]rios?:\s*\n?\s*(.+?)(?:\n\n|$)', text, re.DOTALL | re.IGNORECASE)
@@ -1167,6 +1173,8 @@ def build_lcx_sale(parsed_email):
     # Customer name: booking OWNER (Dados do cliente) + *cvt* + booking number
     # Priority: 1) Dados do cliente (nome + sobrenomes), 2) Passenger 1 fallback
     owner_name = f"{data.get('nome', '')} {data.get('sobrenomes', '')}".strip()
+    # Defense in depth: strip any time pattern that leaked through parser
+    owner_name = re.sub(r'\s+\d{1,2}:\d{2}\s*(?:[ap]\.?\s*m\.?)?\s*$', '', owner_name, flags=re.IGNORECASE).strip()
     if owner_name:
         customer_name = owner_name
     elif data.get("passageiros") and data["passageiros"][0].get("name"):
