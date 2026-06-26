@@ -529,25 +529,38 @@ def parse_text_body(text, booking_number, subject):
     data["preco_liquido"] = parse_brl(preco_liquido)
 
     # Customer data (from "Dados do cliente" section)
-    # Accept value on same line OR next line (one newline). Don't cross blank lines.
-    # If captured value starts with another known label (Hora:, Telefone:, etc), treat as empty.
-    nome_m = re.search(r'Nome:[ \t]*(?:\n[ \t]*)?([^\n]*)', text)
-    sobrenomes_m = re.search(r'Sobrenomes?:[ \t]*(?:\n[ \t]*)?([^\n]*)', text)
-
-    _OTHER_LABEL = re.compile(r'^(Sobrenomes?|Hora|Data|Documento|Idade|Telefone|Lugar|Restri|Coment|Pre[çc]o|N[úu]mero|C[óo]digo|Atividade|Cidade|Idioma|Email|E-mail)\b', re.IGNORECASE)
+    # Accept value on same line OR after blank line(s) until first non-empty line.
+    # BeautifulSoup converts HTML tables with \n between cells, sometimes adds blank lines.
+    # _OTHER_LABEL guard: if captured value is another known field label, treat as empty.
+    _OTHER_LABEL = re.compile(r'^(Sobrenomes?|Hora|Data|Documento|Idade|Telefone|Lugar|Restri|Coment|Pre[çc]o|N[úu]mero|C[óo]digo|Atividade|Cidade|Idioma|Email|E-mail|Dados|\(Dados)\b', re.IGNORECASE)
     _TIME_TRAIL = re.compile(r'\s+\d{1,2}:\d{2}\s*(?:[ap]\.?\s*m\.?)?\s*$', re.IGNORECASE)
 
-    def _clean_field(val):
-        if not val:
-            return ""
-        v = val.strip()
-        if _OTHER_LABEL.match(v):
-            return ""
-        v = _TIME_TRAIL.sub("", v).strip()
-        return v
+    def _extract_owner_field(label):
+        # Try multiple gaps: 0 newlines (same line), 1, 2, 3 newlines (blank lines between).
+        # Use lookahead to match first non-empty line after label.
+        for gap_pattern in [r'[ \t]+', r'[ \t]*\n[ \t]*', r'[ \t]*\n[ \t]*\n[ \t]*', r'[ \t]*\n[ \t]*\n[ \t]*\n[ \t]*']:
+            m = re.search(rf'{label}:{gap_pattern}([^\n]+)', text)
+            if m:
+                v = m.group(1).strip()
+                if v and not _OTHER_LABEL.match(v):
+                    v = _TIME_TRAIL.sub("", v).strip()
+                    if v:
+                        return v
+        return ""
 
-    data["nome"] = _clean_field(nome_m.group(1) if nome_m else "")
-    data["sobrenomes"] = _clean_field(sobrenomes_m.group(1) if sobrenomes_m else "")
+    # Also support "Nome e sobrenomes" / "Nome y apellidos" (new template, combined field)
+    combined_m = re.search(r'Nome\s+e\s+sobrenomes[ \t]*(?:\n[ \t]*)*([^\n]+)', text, re.IGNORECASE)
+    if combined_m:
+        v = combined_m.group(1).strip()
+        if v and not _OTHER_LABEL.match(v):
+            data["nome"] = _TIME_TRAIL.sub("", v).strip()
+            data["sobrenomes"] = ""
+        else:
+            data["nome"] = _extract_owner_field("Nome")
+            data["sobrenomes"] = _extract_owner_field("Sobrenomes?")
+    else:
+        data["nome"] = _extract_owner_field("Nome")
+        data["sobrenomes"] = _extract_owner_field("Sobrenomes?")
 
     # Comentários
     comentario = re.search(r'Coment[áa]rios?:\s*\n?\s*(.+?)(?:\n\n|$)', text, re.DOTALL | re.IGNORECASE)
