@@ -529,17 +529,25 @@ def parse_text_body(text, booking_number, subject):
     data["preco_liquido"] = parse_brl(preco_liquido)
 
     # Customer data (from "Dados do cliente" section)
-    # Restrict to same line ([^\n]*) so empty value does NOT capture next field's value
-    nome = re.search(r'Nome:[ \t]*([^\n]*)', text)
-    sobrenomes = re.search(r'Sobrenomes?:[ \t]*([^\n]*)', text)
+    # Accept value on same line OR next line (one newline). Don't cross blank lines.
+    # If captured value starts with another known label (Hora:, Telefone:, etc), treat as empty.
+    nome_m = re.search(r'Nome:[ \t]*(?:\n[ \t]*)?([^\n]*)', text)
+    sobrenomes_m = re.search(r'Sobrenomes?:[ \t]*(?:\n[ \t]*)?([^\n]*)', text)
 
-    data["nome"] = nome.group(1).strip() if nome else ""
-    data["sobrenomes"] = sobrenomes.group(1).strip() if sobrenomes else ""
-
-    # Defense: strip trailing time pattern like " 5:00 AM", " 14:00" leaked from other fields
+    _OTHER_LABEL = re.compile(r'^(Sobrenomes?|Hora|Data|Documento|Idade|Telefone|Lugar|Restri|Coment|Pre[çc]o|N[úu]mero|C[óo]digo|Atividade|Cidade|Idioma|Email|E-mail)\b', re.IGNORECASE)
     _TIME_TRAIL = re.compile(r'\s+\d{1,2}:\d{2}\s*(?:[ap]\.?\s*m\.?)?\s*$', re.IGNORECASE)
-    data["nome"] = _TIME_TRAIL.sub("", data["nome"]).strip()
-    data["sobrenomes"] = _TIME_TRAIL.sub("", data["sobrenomes"]).strip()
+
+    def _clean_field(val):
+        if not val:
+            return ""
+        v = val.strip()
+        if _OTHER_LABEL.match(v):
+            return ""
+        v = _TIME_TRAIL.sub("", v).strip()
+        return v
+
+    data["nome"] = _clean_field(nome_m.group(1) if nome_m else "")
+    data["sobrenomes"] = _clean_field(sobrenomes_m.group(1) if sobrenomes_m else "")
 
     # Comentários
     comentario = re.search(r'Coment[áa]rios?:\s*\n?\s*(.+?)(?:\n\n|$)', text, re.DOTALL | re.IGNORECASE)
