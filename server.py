@@ -2097,6 +2097,11 @@ def auto_scan_worker():
                 new_notes = (current.rstrip() + " | " + mod_marker) if current.strip() else mod_marker
                 res = lcx_client.update_sale_notes(sale_id, new_notes)
                 if res.get("success"):
+                    # Volta status pra PENDING pra B2B revalidar a modificacao
+                    try:
+                        lcx_client.update_sale_status(sale_id, "PENDING")
+                    except Exception as _e:
+                        print(f"[MOD] WARN: falha ao setar PENDING em {sale_id}: {_e}")
                     modified_count += 1
                     record_launch(booking_num, "", "MODIFICADO", sale_id, em.get("atividade", ""))
                     print(f"[MOD] Booking #{booking_num} modificação anotada no LCX (sale {sale_id})")
