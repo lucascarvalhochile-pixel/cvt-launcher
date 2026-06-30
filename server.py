@@ -818,32 +818,59 @@ class LCXClient:
 
     def find_sale_id(self, booking_number):
         """Search LCX for a sale with *cvt* #BOOKING and return its sale_id.
-        Used after createSale when the RSC response doesn't return a clear sale_id."""
+        STRICT MATCHING (fix 29/06/2026):
+          - Word boundary regex impede prefix collision (#39208 != #392084433)
+          - Para cada href de venda na página, valida que o booking EXATO está
+            no contexto próximo (mesma "row" ~500 chars) E que não há outros
+            bookings diferentes nessa janela.
+        Sem isso, o LCX search retorna múltiplas vendas (busca fuzzy/prefix em
+        nome do cliente, notes, obs interna) e o regex pega o PRIMEIRO href —
+        que pode ser de OUTRA venda. Resultado: cancela/edita a venda errada.
+        """
         try:
             r = self.session.get(
                 f"{LCX_BASE}/dashboard/vendas?search={booking_number}",
                 headers={"Accept": "text/html"},
                 timeout=15,
             )
-            if r.status_code == 200:
-                if f"*cvt* #{booking_number}" in r.text or f"*cvt*#{booking_number}" in r.text:
-                    id_match = re.search(r'href="/dashboard/vendas/(cm[a-z0-9]+)"', r.text)
-                    if id_match:
-                        found_id = id_match.group(1)
-                        print(f"[LCX] Found sale_id {found_id} for booking #{booking_number}")
-                        return found_id
+            if r.status_code != 200:
+                return None
+            booking_pattern = re.compile(
+                rf'\*cvt\*\s*#{re.escape(booking_number)}(?!\d)'
+            )
+            for m in re.finditer(r'href="/dashboard/vendas/(cm[a-z0-9]+)"', r.text):
+                sale_id_candidate = m.group(1)
+                start = max(0, m.start() - 500)
+                end = min(len(r.text), m.end() + 500)
+                context = r.text[start:end]
+                if not booking_pattern.search(context):
+                    continue
+                other_bookings = set(re.findall(r'\*cvt\*\s*#(\d+)', context))
+                # Aceita só se o ÚNICO booking *cvt* na janela for o esperado
+                if other_bookings == {booking_number}:
+                    print(f"[LCX] Found sale_id {sale_id_candidate} for booking #{booking_number} (row validated)")
+                    return sale_id_candidate
+            print(f"[LCX] No sale found with EXACT *cvt* #{booking_number} match in row context")
+            return None
         except Exception as e:
             print(f"[LCX] Error finding sale_id for #{booking_number}: {e}")
-        return None
+            return None
 
     def booking_exists(self, booking_number, max_retries=3):
         """Check if a CVT booking already exists in LCX by searching for *cvt* #BOOKING.
+        STRICT MATCHING (fix 29/06/2026): valida match exato com word boundary
+        E presença de href de venda no mesmo contexto (~500 chars).
+        Sem isso, o LCX search retorna falsos positivos por prefix/fuzzy match.
         Retries up to max_retries times on transient errors (timeout, HTTP 5xx).
         FAIL-CLOSED after all retries exhausted: assumes exists to prevent duplicates."""
         if not self.logged_in:
             if not self.login():
                 print(f"[LCX-DEDUP] Cannot check booking #{booking_number} — login failed, BLOCKING launch")
-                return True  # FAIL-CLOSED: don't create if we can't verify
+                return True
+
+        booking_pattern = re.compile(
+            rf'\*cvt\*\s*#{re.escape(booking_number)}(?!\d)'
+        )
 
         for attempt in range(1, max_retries + 1):
             try:
@@ -853,22 +880,27 @@ class LCXClient:
                     timeout=20,
                 )
                 if r.status_code == 200:
-                    # Check if any sale link appears AND the booking number is in a *cvt* tag
-                    has_sale = bool(re.search(r'href="/dashboard/vendas/cm[a-z0-9]+"', r.text))
-                    has_booking = f"*cvt* #{booking_number}" in r.text or f"*cvt*#{booking_number}" in r.text
-                    exists = has_sale and has_booking
+                    exists = False
+                    for m in re.finditer(r'href="/dashboard/vendas/(cm[a-z0-9]+)"', r.text):
+                        start = max(0, m.start() - 500)
+                        end = min(len(r.text), m.end() + 500)
+                        context = r.text[start:end]
+                        if not booking_pattern.search(context):
+                            continue
+                        other_bookings = set(re.findall(r'\*cvt\*\s*#(\d+)', context))
+                        if other_bookings == {booking_number}:
+                            exists = True
+                            break
                     if exists:
                         print(f"[LCX-DEDUP] Booking #{booking_number} ALREADY EXISTS in LCX — skipping")
                     else:
-                        print(f"[LCX-DEDUP] Booking #{booking_number} NOT found in LCX — will create")
+                        print(f"[LCX-DEDUP] Booking #{booking_number} NOT found in LCX (strict match) — will create")
                     return exists
 
-                # HTTP error but not server error — don't retry (e.g. 403, 404)
                 if r.status_code < 500:
                     print(f"[LCX-DEDUP] HTTP {r.status_code} checking #{booking_number} — BLOCKING launch")
-                    return True  # FAIL-CLOSED
+                    return True
 
-                # Server error (5xx) — retry
                 print(f"[LCX-DEDUP] HTTP {r.status_code} checking #{booking_number} — attempt {attempt}/{max_retries}")
 
             except requests.exceptions.Timeout:
@@ -878,13 +910,10 @@ class LCXClient:
             except Exception as e:
                 print(f"[LCX-DEDUP] Error checking #{booking_number}: {e} — attempt {attempt}/{max_retries}")
 
-            # Wait before retry (exponential backoff: 2s, 4s, 8s)
             if attempt < max_retries:
                 wait = 2 ** attempt
                 print(f"[LCX-DEDUP] Retrying in {wait}s...")
                 time.sleep(wait)
-
-                # Re-login if session might have expired
                 if not self.logged_in or attempt >= 2:
                     print(f"[LCX-DEDUP] Re-login before retry {attempt + 1}")
                     self.logged_in = False
@@ -893,7 +922,8 @@ class LCXClient:
                         return True
 
         print(f"[LCX-DEDUP] All {max_retries} attempts failed for #{booking_number} — BLOCKING launch (fail-closed)")
-        return True  # FAIL-CLOSED after all retries
+        return True
+
 
 
 lcx_client = LCXClient()
