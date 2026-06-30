@@ -858,14 +858,13 @@ class LCXClient:
 
     def booking_exists(self, booking_number, max_retries=3):
         """Check if a CVT booking already exists in LCX by searching for *cvt* #BOOKING.
-        STRICT MATCHING (fix 29/06/2026): valida match exato com word boundary
-        E presença de href de venda no mesmo contexto (~500 chars).
-        Sem isso, o LCX search retorna falsos positivos por prefix/fuzzy match.
+        Word boundary impede prefix collision (#39208 != #392084433) mas NAO exige row context strict
+        (a UI da listagem trunca customer.name; strict match gerava falsos negativos -> duplicatas).
         Retries up to max_retries times on transient errors (timeout, HTTP 5xx).
         FAIL-CLOSED after all retries exhausted: assumes exists to prevent duplicates."""
         if not self.logged_in:
             if not self.login():
-                print(f"[LCX-DEDUP] Cannot check booking #{booking_number} — login failed, BLOCKING launch")
+                print(f"[LCX-DEDUP] Cannot check booking #{booking_number} - login failed, BLOCKING launch")
                 return True
 
         booking_pattern = re.compile(
@@ -880,35 +879,27 @@ class LCXClient:
                     timeout=20,
                 )
                 if r.status_code == 200:
-                    exists = False
-                    for m in re.finditer(r'href="/dashboard/vendas/(cm[a-z0-9]+)"', r.text):
-                        start = max(0, m.start() - 500)
-                        end = min(len(r.text), m.end() + 500)
-                        context = r.text[start:end]
-                        if not booking_pattern.search(context):
-                            continue
-                        other_bookings = set(re.findall(r'\*cvt\*\s*#(\d+)', context))
-                        if other_bookings == {booking_number}:
-                            exists = True
-                            break
+                    has_sale = bool(re.search(r'href="/dashboard/vendas/cm[a-z0-9]+"', r.text))
+                    has_booking = bool(booking_pattern.search(r.text))
+                    exists = has_sale and has_booking
                     if exists:
-                        print(f"[LCX-DEDUP] Booking #{booking_number} ALREADY EXISTS in LCX — skipping")
+                        print(f"[LCX-DEDUP] Booking #{booking_number} ALREADY EXISTS in LCX - skipping")
                     else:
-                        print(f"[LCX-DEDUP] Booking #{booking_number} NOT found in LCX (strict match) — will create")
+                        print(f"[LCX-DEDUP] Booking #{booking_number} NOT found in LCX - will create")
                     return exists
 
                 if r.status_code < 500:
-                    print(f"[LCX-DEDUP] HTTP {r.status_code} checking #{booking_number} — BLOCKING launch")
+                    print(f"[LCX-DEDUP] HTTP {r.status_code} checking #{booking_number} - BLOCKING launch")
                     return True
 
-                print(f"[LCX-DEDUP] HTTP {r.status_code} checking #{booking_number} — attempt {attempt}/{max_retries}")
+                print(f"[LCX-DEDUP] HTTP {r.status_code} checking #{booking_number} - attempt {attempt}/{max_retries}")
 
             except requests.exceptions.Timeout:
-                print(f"[LCX-DEDUP] Timeout checking #{booking_number} — attempt {attempt}/{max_retries}")
+                print(f"[LCX-DEDUP] Timeout checking #{booking_number} - attempt {attempt}/{max_retries}")
             except requests.exceptions.ConnectionError:
-                print(f"[LCX-DEDUP] Connection error checking #{booking_number} — attempt {attempt}/{max_retries}")
+                print(f"[LCX-DEDUP] Connection error checking #{booking_number} - attempt {attempt}/{max_retries}")
             except Exception as e:
-                print(f"[LCX-DEDUP] Error checking #{booking_number}: {e} — attempt {attempt}/{max_retries}")
+                print(f"[LCX-DEDUP] Error checking #{booking_number}: {e} - attempt {attempt}/{max_retries}")
 
             if attempt < max_retries:
                 wait = 2 ** attempt
@@ -918,12 +909,11 @@ class LCXClient:
                     print(f"[LCX-DEDUP] Re-login before retry {attempt + 1}")
                     self.logged_in = False
                     if not self.login():
-                        print(f"[LCX-DEDUP] Re-login failed — BLOCKING launch for #{booking_number}")
+                        print(f"[LCX-DEDUP] Re-login failed - BLOCKING launch for #{booking_number}")
                         return True
 
-        print(f"[LCX-DEDUP] All {max_retries} attempts failed for #{booking_number} — BLOCKING launch (fail-closed)")
+        print(f"[LCX-DEDUP] All {max_retries} attempts failed for #{booking_number} - BLOCKING launch (fail-closed)")
         return True
-
 
 
 lcx_client = LCXClient()
