@@ -1371,7 +1371,7 @@ def build_lcx_sale(parsed_email):
         "tripStartDate": tour_date,
         "tripEndDate": tour_date,
         "numberOfPeople": num_people,
-        "status": "CONFIRMED",
+        "status": "PENDING",
         "items": items,
         "payments": payments,
         "participants": participants,
@@ -1974,7 +1974,8 @@ def auto_scan_worker():
                         print(f"[AUTO-SCAN] Recovered sale_id {found_id} for booking #{booking_num}")
 
                 if result.get("success") and actual_sale_id and actual_sale_id not in ("unknown", "pending"):
-                    lcx_client.update_sale_status(actual_sale_id, "CONFIRMED")
+                    # CONFIRMED removido - cliente valida manualmente
+                    # lcx_client.update_sale_status(actual_sale_id, "CONFIRMED")
                     record_to_tracker(em, codigo_lcx, actual_sale_id)
 
                 status = "OK" if result.get("success") else "ERRO"
@@ -2185,7 +2186,7 @@ def auto_scan_worker():
                             "tripStartDate": tour_date,
                             "tripEndDate": tour_date,
                             "numberOfPeople": n_pax,
-                            "status": "CONFIRMED",
+                            "status": "PENDING",
                             "items": [{
                                 "country": "Chile",
                                 "city": "Santiago",
