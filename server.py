@@ -62,11 +62,11 @@ CIVITATIS_PROVIDER_HASH = os.environ.get(
 )
 
 # Server action IDs (reverse-engineered from LCX)
-ACTION_CREATE_SALE = "609f7b5db6a755fab0e8b6d74c3c7b75738c23b7b2"
-ACTION_GET_TOURS = "407916aff8f6c22c5e4a0cf4c933b84b212f0285d0"
-ACTION_UPDATE_SALE_STATUS = "4078535fad4e10d4138d558f8ed3e2c27a10180eaa"
-ACTION_UPDATE_SALE_ITEM_STATUS = "70edb46207aca2dfcdbd204b1e3fef26cf92cea64c"
-ACTION_UPDATE_SALE = "70804be85fc4b49c51d744f493e0b563faea8a6b4a"  # Edit full sale; accepts partial payload like {notes: "..."}
+ACTION_CREATE_SALE = "60a3282532e36ad1fe53e335a1c8a9d3e1ae66e0d7"
+ACTION_GET_TOURS = "40af172633f6347fe61f6d38ff85f09cb1e7f98486"
+ACTION_UPDATE_SALE_STATUS = "60a040b364ccb723e6d0f26d97aae14bd0a9809a09"
+ACTION_UPDATE_SALE_ITEM_STATUS = "70d1714f4559c474142d1d2e60c56c7cfb6cb5c177"
+ACTION_UPDATE_SALE = "7092bb726196689cb64a916b21f82484d8325caf46"  # Edit full sale; accepts partial payload like {notes: "..."}
 
 # Auto-scan config
 AUTO_SCAN_INTERVAL = int(os.environ.get("AUTO_SCAN_INTERVAL", "300"))  # 5 min
