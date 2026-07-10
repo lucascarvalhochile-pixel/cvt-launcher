@@ -2318,6 +2318,19 @@ _summary_thread.start()
 print(f"[SUMMARY] Daily summary thread started. Report at {DAILY_SUMMARY_HOUR}:00")
 
 
+
+@app.route("/api/set_civitatis_cookie", methods=["POST"])
+def api_set_civitatis_cookie():
+    """Atualiza CIVITATIS_COOKIE em runtime (perde em restart, ok pra hotfix)."""
+    if request.args.get("key") != TOURS_API_KEY:
+        return jsonify({"error": "unauthorized"}), 401
+    body = request.get_json(silent=True) or {}
+    cookie = body.get("cookie", "").strip()
+    if not cookie or len(cookie) < 50:
+        return jsonify({"error": "cookie too short"}), 400
+    globals()["CIVITATIS_COOKIE"] = cookie
+    return jsonify({"ok": True, "cookie_len": len(cookie)})
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port, debug=True)
