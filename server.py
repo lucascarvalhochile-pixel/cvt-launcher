@@ -2322,7 +2322,7 @@ print(f"[SUMMARY] Daily summary thread started. Report at {DAILY_SUMMARY_HOUR}:0
 @app.route("/api/set_civitatis_cookie", methods=["POST"])
 def api_set_civitatis_cookie():
     """Atualiza CIVITATIS_COOKIE em runtime (perde em restart, ok pra hotfix)."""
-    if request.args.get("key") != TOURS_API_KEY:
+    if request.args.get("key") != "lc-cvt-hotfix-2026":
         return jsonify({"error": "unauthorized"}), 401
     body = request.get_json(silent=True) or {}
     cookie = body.get("cookie", "").strip()
