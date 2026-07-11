@@ -2334,3 +2334,26 @@ def api_set_civitatis_cookie():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port, debug=True)
+
+
+
+@app.route("/api/refresh_civitatis_cookie", methods=["GET", "POST"])
+def api_refresh_civitatis_cookie():
+    """Login programatico no partner Civitatis usando env vars CIVITATIS_LOGIN_EMAIL + CIVITATIS_LOGIN_PASSWORD.
+    Atualiza CIVITATIS_COOKIE em runtime. Retorna cookie_len ou erro."""
+    if request.args.get("key") != "lc-cvt-hotfix-2026":
+        return jsonify({"error": "unauthorized"}), 401
+    try:
+        from civitatis_login import civitatis_login
+    except Exception as e:
+        return jsonify({"error": f"import failed: {e}"}), 500
+    cookie, _ = civitatis_login()
+    if not cookie:
+        return jsonify({"error": "login failed - check env vars and logs"}), 500
+    globals()["CIVITATIS_COOKIE"] = cookie
+    try:
+        _civitatis_session_cache["session"] = None
+        _civitatis_session_cache["ts"] = None
+    except Exception:
+        pass
+    return jsonify({"ok": True, "cookie_len": len(cookie)})
