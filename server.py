@@ -1519,7 +1519,7 @@ def record_processed_message_id(message_id, booking_number="", outcome="OK"):
     if not message_id:
         return
     # In-memory cache always updated first (immediate dedup within same scan)
-    _processed_msgids_cache["data"].add(message_id)
+    (_processed_msgids_cache["data"].add(message_id) if not ((outcome or "").upper() == "ERRO" or (outcome or "").upper().endswith("ERR")) else None)
     try:
         gc = _get_sheets_client()
         if not gc:
