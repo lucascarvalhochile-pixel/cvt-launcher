@@ -1095,7 +1095,7 @@ def civitatis_get_phone_by_booking_id(booking_number):
         "User-Agent": CIVITATIS_USER_AGENT,
         "Accept": "application/json",
         "Accept-Language": "es-ES,es;q=0.9,en;q=0.8",
-        "Referer": f"{CIVITATIS_BASE}/es/proveedores/v2/reservas/",
+        "Referer": f"{CIVITATIS_BASE}/br/fornecedores/v2/reservas/atividade/reserva/",
     }
     try:
         r = requests.get(url, headers=headers, params={"lang": "es", "type": "1"}, timeout=15, allow_redirects=False)
