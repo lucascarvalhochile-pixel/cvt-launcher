@@ -65,7 +65,7 @@ def civitatis_login():
         # 4) Se conseguiu, testar rota autenticada
         test = s.get(f"{CIVITATIS_BASE}/br/fornecedores/v2/reservas/", timeout=15,
                      allow_redirects=False)
-        if test.status_code >= 400 and test.status_code != 302:
+        if test.status_code >= 500 or test.status_code in (401, 403):
             print(f"[CVT-LOGIN] Test route retornou {test.status_code} — login falhou")
             return None, None
         if test.status_code == 302 and "login" in (test.headers.get("Location", "") or "").lower():
