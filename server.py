@@ -1192,6 +1192,22 @@ def build_lcx_sale(parsed_email):
     # Example: email Peru/Cusco "Montanha 7 Cores" but matcher returned
     # CHIATA020 (Atacama). validate_tour_country() catches this.
     # ─────────────────────────────────────────────
+    # AM/PM AUTO-FIX (25/07): Marques/Undurraga tem AM/PM. Ajusta pela hora.
+    if codigo_lcx == "CHISAN110":
+        try:
+            h = int(re.sub(r'[^0-9:]', '', (data.get("hora","") or ""))[:5].split(':')[0])
+            if h >= 12:
+                codigo_lcx, nome_lcx = "CHISAN9206", "Vinicola Concha y Toro Marques - Tarde"
+                print(f"[AM/PM] booking #{data.get('booking_number','?')} Marques {h}h -> PM (CHISAN9206)")
+        except: pass
+    elif codigo_lcx == "CHISAN116":
+        try:
+            h = int(re.sub(r'[^0-9:]', '', (data.get("hora","") or ""))[:5].split(':')[0])
+            if 0 < h < 12:
+                codigo_lcx, nome_lcx = "CHISAN7564", "Vinicola Undurraga - Manha"
+                print(f"[AM/PM] booking #{data.get('booking_number','?')} Undurraga {h}h -> AM (CHISAN7564)")
+        except: pass
+
     if codigo_lcx and not validate_tour_country(codigo_lcx, country, city):
         tour_country, tour_city = tour_code_destino(codigo_lcx)
         booking_num = data.get("booking_number", "")
@@ -1320,7 +1336,7 @@ def build_lcx_sale(parsed_email):
     payments = [{
         "method": "CASH",
         "amount": round(preco, 2),
-        "status": "paid",
+        "status": "pending",
     }]
 
     # Build participants from detailed passenger data
@@ -2203,7 +2219,7 @@ def auto_scan_worker():
                                 "price": net_price,
                                 "isGift": False,
                             }],
-                            "payments": [{"method": "CASH", "amount": net_price, "status": "paid"}],
+                            "payments": [{"method": "CASH", "amount": net_price, "status": "pending"}],
                             "participants": [{
                                 "name": ((str(p.get("firstName", "")) + " " + str(p.get("lastName", ""))).strip() or customer_name),
                                 "cpfPassport": p.get("passportId", "") or p.get("nationalId", ""),
