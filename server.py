@@ -1260,7 +1260,7 @@ def build_lcx_sale(parsed_email):
     try:
         preco = float(data.get("preco_venda", "0") or "0")
         if preco == 0:
-            preco = float(data.get("preco_venda", "0") or "0")
+            preco = float(data.get("preco_liquido", "0") or "0")
     except:
         pass
 
