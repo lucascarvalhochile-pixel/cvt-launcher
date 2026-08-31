@@ -1258,7 +1258,7 @@ def build_lcx_sale(parsed_email):
     # Use preço LÍQUIDO (net price), not preço de venda
     preco = 0
     try:
-        preco = float(data.get("preco_liquido", "0") or "0")
+        preco = float(data.get("preco_venda", "0") or "0")
         if preco == 0:
             preco = float(data.get("preco_venda", "0") or "0")
     except:
