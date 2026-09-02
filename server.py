@@ -1207,6 +1207,13 @@ def build_lcx_sale(parsed_email):
                 codigo_lcx, nome_lcx = "CHISAN7564", "Vinicola Undurraga - Manha"
                 print(f"[AM/PM] booking #{data.get('booking_number','?')} Undurraga {h}h -> AM (CHISAN7564)")
         except: pass
+    elif codigo_lcx == "COLSAO077":
+        try:
+            h = int(re.sub(r'[^0-9:]', '', (data.get("hora","") or ""))[:5].split(':')[0])
+            if h >= 12:
+                codigo_lcx, nome_lcx = "COLSA6288", "Parasail - Tarde"
+                print(f"[AM/PM] booking #{data.get('booking_number','?')} Parasail SAI {h}h -> PM (COLSA6288)")
+        except: pass
 
     if codigo_lcx and not validate_tour_country(codigo_lcx, country, city):
         tour_country, tour_city = tour_code_destino(codigo_lcx)
