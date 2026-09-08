@@ -1913,7 +1913,7 @@ def auto_scan_worker():
             auto_scan_status["running"] = True
             auto_scan_status["last_run"] = datetime.now().isoformat()
 
-            hours_since_live = min((datetime.now() - go_live).total_seconds() / 3600, 48)
+            hours_since_live = min((datetime.now() - go_live).total_seconds() / 3600, 168)  # 7d p/ evitar bug SINCE do Gmail IMAP
             hours_since_live = max(hours_since_live, 1)
 
             emails = fetch_new_booking_emails(max_results=50, since_hours=int(hours_since_live) + 1)
