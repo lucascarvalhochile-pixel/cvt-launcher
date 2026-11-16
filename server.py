@@ -62,11 +62,11 @@ CIVITATIS_PROVIDER_HASH = os.environ.get(
 )
 
 # Server action IDs (reverse-engineered from LCX)
-ACTION_CREATE_SALE = "60605e80f5895672601fc25ccbacc0978b329c0a3f"
-ACTION_GET_TOURS = "40cdcb094475580486b409b5f7e11c4b0201c1fd44"
-ACTION_UPDATE_SALE_STATUS = "60a040b364ccb723e6d0f26d97aae14bd0a9809a09"
-ACTION_UPDATE_SALE_ITEM_STATUS = "70d1714f4559c474142d1d2e60c56c7cfb6cb5c177"
-ACTION_UPDATE_SALE = "7092bb726196689cb64a916b21f82484d8325caf46"  # Edit full sale; accepts partial payload like {notes: "..."}
+ACTION_CREATE_SALE = os.getenv("ACTION_CREATE_SALE", "60605e80f5895672601fc25ccbacc0978b329c0a3f")
+ACTION_GET_TOURS = os.getenv("ACTION_GET_TOURS", "40cdcb094475580486b409b5f7e11c4b0201c1fd44")
+ACTION_UPDATE_SALE_STATUS = os.getenv("ACTION_UPDATE_SALE_STATUS", "60a040b364ccb723e6d0f26d97aae14bd0a9809a09")
+ACTION_UPDATE_SALE_ITEM_STATUS = os.getenv("ACTION_UPDATE_SALE_ITEM_STATUS", "70d1714f4559c474142d1d2e60c56c7cfb6cb5c177")
+ACTION_UPDATE_SALE = os.getenv("ACTION_UPDATE_SALE", "7092bb726196689cb64a916b21f82484d8325caf46")  # Edit full sale; accepts partial payload like {notes: "..."}
 
 # Auto-scan config
 AUTO_SCAN_INTERVAL = int(os.environ.get("AUTO_SCAN_INTERVAL", "300"))  # 5 min
@@ -712,6 +712,18 @@ class LCXClient:
                 else:
                     return {"success": True, "sale_id": "pending", "response": text[:500]}
             else:
+                # Detect LCX deploy rotation (action ID 404)
+                if r.status_code == 404 or "Server action not found" in r.text[:200]:
+                    try:
+                        record_alert(
+                            "ACTION_ID_STALE",
+                            "LCX rotacionou action ID do createSale (404)",
+                            f"ACTION_CREATE_SALE atual: {ACTION_CREATE_SALE}\n"
+                            f"Descobrir o novo e trocar em runtime:\n"
+                            f"https://{os.getenv('RAILWAY_PUBLIC_DOMAIN','<cvt-url>')}/admin/set_action/ACTION_CREATE_SALE/<NEW_ID>?secret={ADMIN_SECRET}"
+                        )
+                    except Exception:
+                        pass
                 return {"success": False, "error": f"HTTP {r.status_code}: {r.text[:300]}"}
         except Exception as e:
             return {"success": False, "error": str(e)}
@@ -2353,6 +2365,63 @@ def api_set_civitatis_cookie():
         return jsonify({"error": "cookie too short"}), 400
     globals()["CIVITATIS_COOKIE"] = cookie
     return jsonify({"ok": True, "cookie_len": len(cookie)})
+
+
+
+# ═══════════════════════════════════════════════════════
+# ADMIN — hot-swap Next.js action IDs without redeploy
+# Added after repeated LCX deploys rotating server action IDs.
+# Overrides take priority over env-loaded defaults.
+# ═══════════════════════════════════════════════════════
+ADMIN_SECRET = os.getenv("CVT_ADMIN_SECRET", "lc-doctor-2026")
+_action_overrides = {}
+
+def _current_action(name):
+    """Return the currently active action id for a given name."""
+    if name in _action_overrides:
+        return _action_overrides[name]
+    return globals().get(name)
+
+def _apply_override(name, new_id):
+    """Apply override and update globals so existing code sees the new id."""
+    _action_overrides[name] = new_id
+    globals()[name] = new_id
+
+@app.route("/admin/actions", methods=["GET"])
+def admin_actions_get():
+    """List current action IDs (both env defaults and runtime overrides)."""
+    if request.args.get("secret") != ADMIN_SECRET:
+        return jsonify({"error": "unauthorized"}), 401
+    return jsonify({
+        "ACTION_CREATE_SALE": ACTION_CREATE_SALE,
+        "ACTION_GET_TOURS": ACTION_GET_TOURS,
+        "ACTION_UPDATE_SALE_STATUS": ACTION_UPDATE_SALE_STATUS,
+        "ACTION_UPDATE_SALE_ITEM_STATUS": ACTION_UPDATE_SALE_ITEM_STATUS,
+        "ACTION_UPDATE_SALE": ACTION_UPDATE_SALE,
+        "overrides": _action_overrides,
+    })
+
+@app.route("/admin/set_action/<name>/<new_id>", methods=["GET", "POST"])
+def admin_set_action(name, new_id):
+    """Rotate a single action ID in runtime. No redeploy needed."""
+    if request.args.get("secret") != ADMIN_SECRET:
+        return jsonify({"error": "unauthorized"}), 401
+    valid = {"ACTION_CREATE_SALE", "ACTION_GET_TOURS", "ACTION_UPDATE_SALE_STATUS",
+             "ACTION_UPDATE_SALE_ITEM_STATUS", "ACTION_UPDATE_SALE"}
+    if name not in valid:
+        return jsonify({"error": f"unknown action '{name}'", "valid": sorted(valid)}), 400
+    if not re.fullmatch(r"[a-f0-9]{40,44}", new_id):
+        return jsonify({"error": "new_id must be 40-44 hex chars"}), 400
+    old = globals().get(name)
+    _apply_override(name, new_id)
+    print(f"[ADMIN] {name}: {old} -> {new_id}")
+    try:
+        record_alert("ACTION_ID_SWAPPED", f"{name} rotacionado via admin",
+                     f"antes: {old}\nagora: {new_id}")
+    except Exception:
+        pass
+    return jsonify({"ok": True, "name": name, "old": old, "new": new_id})
+
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
